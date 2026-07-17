@@ -813,11 +813,15 @@ contain request IDs.
 - One process owns one in-memory IFC model.
 - Loading a file replaces the current model.
 - Commands are executed sequentially.
-- Edits remain in memory until `save` succeeds.
 - There is no transaction, undo, or automatic backup mechanism.
 - The process exits on `exit`, end-of-input, or a fatal process-level failure.
 - Normal command failures return `{ "ok": false }` and leave the process
   available for subsequent commands.
+
+Edits are applied to the in-memory model immediately. The `save` action writes
+the current state to disk without unloading it, so the same model remains
+available for subsequent edits. The model is replaced only by `load` or released
+when the process exits.
 
 For concurrent jobs, start one `ifc-cli` process per independently edited IFC
 file or place a serialized request queue in front of each process.
