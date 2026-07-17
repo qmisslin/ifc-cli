@@ -1,0 +1,80 @@
+# IfcOpenShell is built locally and is not vendored in this repository.
+IfcOpenShell/
+
+# CMake build directories and generated files.
+/build/
+/build-*/
+/out/
+/cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+Makefile
+compile_commands.json
+install_manifest.txt
+CMakeUserPresets.json
+
+# Visual Studio and MSVC output.
+/.vs/
+/Debug/
+/Release/
+/RelWithDebInfo/
+/MinSizeRel/
+/x64/
+/x86/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.user
+*.suo
+*.obj
+*.pch
+*.pdb
+*.ilk
+*.idb
+*.exp
+*.lib
+*.dll
+*.exe
+*.tlog
+
+# Unix and macOS compiler output.
+*.o
+*.a
+*.so
+*.so.*
+*.dylib
+*.dSYM/
+
+# Dependency and package-manager caches.
+/_deps/
+/.cache/
+/.cmake/
+
+# Editor-specific local settings.
+/.vscode/
+/.idea/
+*.code-workspace
+*.swp
+*.swo
+*~
+
+# Operating-system metadata.
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Logs, crash dumps, and temporary files.
+*.log
+*.tmp
+*.temp
+*.bak
+*.dmp
+*.stackdump
+samples/
+
+# Local IFC samples and working models.
+/samples/
