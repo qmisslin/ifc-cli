@@ -440,8 +440,126 @@ elseif(APPLE)
         ifc-cli
         PROPERTIES
             BUILD_RPATH "${IFCOPENSHELL_ROOT}/lib"
-            INSTALL_RPATH "${IFCOPENSHELL_ROOT}/lib"
+            INSTALL_RPATH "@executable_path"
             MACOSX_RPATH ON
+    )
+
+    set(
+        MACOS_BUNDLE_SEARCH_DIRS
+        "${IFCOPENSHELL_ROOT}/lib"
+    )
+
+    foreach(_ifc_library IN ITEMS
+        "${IFC_PARSE_LIBRARY}"
+        "${IFC_GEOM_LIBRARY}"
+        "${IFC_GEOM_KERNEL_LIBRARY}"
+    )
+        get_filename_component(
+            _ifc_library_directory
+            "${_ifc_library}"
+            DIRECTORY
+        )
+
+        list(
+            APPEND
+            MACOS_BUNDLE_SEARCH_DIRS
+            "${_ifc_library_directory}"
+        )
+    endforeach()
+
+    foreach(_opencascade_library IN LISTS OpenCASCADE_LIBRARIES)
+        if(IS_ABSOLUTE "${_opencascade_library}")
+            get_filename_component(
+                _opencascade_library_directory
+                "${_opencascade_library}"
+                DIRECTORY
+            )
+
+            list(
+                APPEND
+                MACOS_BUNDLE_SEARCH_DIRS
+                "${_opencascade_library_directory}"
+            )
+        endif()
+    endforeach()
+
+    if(DEFINED OpenCASCADE_LIBRARY_DIR)
+        list(
+            APPEND
+            MACOS_BUNDLE_SEARCH_DIRS
+            "${OpenCASCADE_LIBRARY_DIR}"
+        )
+    endif()
+
+    if(DEFINED OpenCASCADE_LIBRARY_DIRS)
+        list(
+            APPEND
+            MACOS_BUNDLE_SEARCH_DIRS
+            ${OpenCASCADE_LIBRARY_DIRS}
+        )
+    endif()
+
+    find_program(HOMEBREW_EXECUTABLE brew)
+
+    if(HOMEBREW_EXECUTABLE)
+        execute_process(
+            COMMAND "${HOMEBREW_EXECUTABLE}" --prefix
+            OUTPUT_VARIABLE HOMEBREW_PREFIX
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            RESULT_VARIABLE HOMEBREW_RESULT
+        )
+
+        if(HOMEBREW_RESULT EQUAL 0)
+            list(
+                APPEND
+                MACOS_BUNDLE_SEARCH_DIRS
+                "${HOMEBREW_PREFIX}/lib"
+                "${HOMEBREW_PREFIX}/opt/opencascade/lib"
+                "${HOMEBREW_PREFIX}/opt/boost/lib"
+            )
+        endif()
+    endif()
+
+    list(
+        FILTER
+        MACOS_BUNDLE_SEARCH_DIRS
+        EXCLUDE
+        REGEX "^$"
+    )
+
+    list(
+        REMOVE_DUPLICATES
+        MACOS_BUNDLE_SEARCH_DIRS
+    )
+
+    install(
+        TARGETS ifc-cli
+        RUNTIME DESTINATION "."
+    )
+
+    install(
+        FILES
+            "${CMAKE_CURRENT_SOURCE_DIR}/README.md"
+        DESTINATION "."
+    )
+
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
+        install(
+            FILES
+                "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
+            DESTINATION "."
+        )
+    endif()
+
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/FixupMacBundle.cmake.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/FixupMacBundle.cmake"
+        @ONLY
+    )
+
+    install(
+        SCRIPT
+        "${CMAKE_CURRENT_BINARY_DIR}/FixupMacBundle.cmake"
     )
 
 else()

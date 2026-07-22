@@ -1,0 +1,119 @@
+cmake_minimum_required(VERSION 3.21)
+
+set(
+    _bundle_executable
+    "${CMAKE_INSTALL_PREFIX}/ifc-cli"
+)
+
+if(NOT EXISTS "${_bundle_executable}")
+    message(
+        FATAL_ERROR
+        "Installed executable does not exist: ${_bundle_executable}"
+    )
+endif()
+
+find_program(
+    DYLIBBUNDLER_EXECUTABLE
+    NAMES dylibbundler
+    REQUIRED
+)
+
+set(
+    _search_directories
+    "@MACOS_BUNDLE_SEARCH_DIRS@"
+)
+
+set(_search_arguments)
+
+foreach(_search_directory IN LISTS _search_directories)
+    if(EXISTS "${_search_directory}")
+        list(
+            APPEND
+            _search_arguments
+            -s "${_search_directory}"
+        )
+    endif()
+endforeach()
+
+message(
+    STATUS
+    "Creating portable macOS CLI bundle for ${_bundle_executable}"
+)
+
+execute_process(
+    COMMAND
+        "${DYLIBBUNDLER_EXECUTABLE}"
+        -od
+        -b
+        -x "${_bundle_executable}"
+        -d "lib"
+        -p "@executable_path/lib/"
+        -i "/usr/lib/"
+        -i "/System/Library/"
+        ${_search_arguments}
+
+    WORKING_DIRECTORY
+        "${CMAKE_INSTALL_PREFIX}"
+
+    RESULT_VARIABLE
+        _dylibbundler_result
+
+    OUTPUT_VARIABLE
+        _dylibbundler_output
+
+    ERROR_VARIABLE
+        _dylibbundler_error
+)
+
+if(NOT _dylibbundler_output STREQUAL "")
+    message(STATUS "${_dylibbundler_output}")
+endif()
+
+if(NOT _dylibbundler_error STREQUAL "")
+    message(STATUS "${_dylibbundler_error}")
+endif()
+
+if(NOT _dylibbundler_result EQUAL 0)
+    message(
+        FATAL_ERROR
+        "dylibbundler failed with exit code ${_dylibbundler_result}"
+    )
+endif()
+
+execute_process(
+    COMMAND
+        codesign
+        --force
+        --sign
+        -
+        "${_bundle_executable}"
+
+    RESULT_VARIABLE
+        _codesign_result
+
+    OUTPUT_VARIABLE
+        _codesign_output
+
+    ERROR_VARIABLE
+        _codesign_error
+)
+
+if(NOT _codesign_output STREQUAL "")
+    message(STATUS "${_codesign_output}")
+endif()
+
+if(NOT _codesign_error STREQUAL "")
+    message(STATUS "${_codesign_error}")
+endif()
+
+if(NOT _codesign_result EQUAL 0)
+    message(
+        FATAL_ERROR
+        "Ad-hoc codesigning failed with exit code ${_codesign_result}"
+    )
+endif()
+
+message(
+    STATUS
+    "Portable macOS bundle created successfully"
+)
