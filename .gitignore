@@ -15,6 +15,9 @@ Makefile
 compile_commands.json
 install_manifest.txt
 CMakeUserPresets.json
+package-windows/
+dist/
+portable-test/
 
 # Visual Studio and MSVC output.
 /.vs/
