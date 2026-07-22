@@ -17,26 +17,47 @@ It is built on top of [IfcOpenShell](https://ifcopenshell.org/) and is intended 
 
 ## Requirements
 
-The current build instructions target macOS.
-
 Required dependencies:
 
 * C++17 compiler
 * CMake 3.21 or newer
-* Ninja
 * IfcOpenShell with IfcGeom and OpenCascade support
 * Boost
 * Eigen
 * OpenCascade
 * nlohmann/json
 
-Install the Homebrew dependencies:
+### Windows
+
+The Windows build uses:
+
+* Visual Studio 2022 with the Desktop development with C++ workload
+* MSVC x64
+* A Windows SDK
+* A local IfcOpenShell build located in `./IfcOpenShell`
+
+IfcOpenShell must be built and installed with the following directories:
+
+```text
+IfcOpenShell/_installed-vs2022-x64
+IfcOpenShell/_deps-vs2022-x64-installed
+```
+
+The expected IfcOpenShell CMake package is:
+
+```text
+IfcOpenShell/_installed-vs2022-x64/lib/cmake/IfcOpenShell/IfcOpenShellConfig.cmake
+```
+
+### macOS
+
+Install the dependencies with Homebrew:
 
 ```bash
 brew install cmake ninja boost eigen opencascade nlohmann-json
 ```
 
-IfcOpenShell must already be installed. The default path used below is:
+IfcOpenShell must already be installed. The default installation path is:
 
 ```text
 $HOME/.local/ifcopenshell
@@ -44,14 +65,40 @@ $HOME/.local/ifcopenshell
 
 ## Build
 
+### Windows
+
+Run the following commands from Git Bash, a Visual Studio developer shell, or another terminal where CMake and Visual Studio are available:
+
+```bash
+rm -rf build
+
+cmake \
+    -S . \
+    -B build \
+    -G "Visual Studio 17 2022" \
+    -A x64
+
+cmake --build build --config Release --parallel
+```
+
+The executable is generated at:
+
+```text
+build/Release/ifc-cli.exe
+```
+
+IfcOpenShell is currently built and installed in `Release`, so the CLI must also be compiled using the `Release` configuration.
+
+### macOS
+
 ```bash
 cmake \
-  -S . \
-  -B build \
-  -G Ninja \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_PREFIX_PATH="$(brew --prefix)" \
-  -DIFCOPENSHELL_ROOT="$HOME/.local/ifcopenshell"
+    -S . \
+    -B build \
+    -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_PREFIX_PATH="$(brew --prefix)" \
+    -DIFCOPENSHELL_ROOT="$HOME/.local/ifcopenshell"
 
 cmake --build build --parallel
 ```

@@ -453,7 +453,7 @@ inline json attributeValueToJson(const AttributeValue& value, const EntityResolv
         case IfcUtil::Argument_BOOL:
             return static_cast<bool>(value);
         case IfcUtil::Argument_LOGICAL: {
-            const boost::logic::tribool logical = static_cast<boost::logic::tribool>(value);
+            const boost::logic::tribool logical = value;
             return boost::logic::indeterminate(logical) ? json(nullptr) : json(static_cast<bool>(logical));
         }
         case IfcUtil::Argument_DOUBLE:
@@ -739,7 +739,7 @@ inline json readIfcValue(const Base* value) {
         case IfcUtil::Argument_BOOL:
             return static_cast<bool>(argument);
         case IfcUtil::Argument_LOGICAL: {
-            const boost::logic::tribool logical = static_cast<boost::logic::tribool>(argument);
+            const boost::logic::tribool logical = argument;
             return boost::logic::indeterminate(logical) ? json(nullptr) : json(static_cast<bool>(logical));
         }
         case IfcUtil::Argument_DOUBLE:
