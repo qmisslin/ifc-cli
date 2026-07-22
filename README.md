@@ -109,6 +109,10 @@ The executable is generated at:
 build/ifc-cli
 ```
 
+### Portable release bundles
+
+For reproducible portable Windows x64 and macOS arm64 release builds, see [`build.md`](build.md).
+
 ## Usage
 
 Start the process:
@@ -162,6 +166,7 @@ The functional JSONL API documentation is available in [`doc.md`](doc.md).
 ifc-cli/
 ├── CMakeLists.txt
 ├── README.md
+├── build.md
 ├── doc.md
 ├── LICENSE
 └── src/
