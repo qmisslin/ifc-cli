@@ -18,6 +18,8 @@ CMakeUserPresets.json
 package-windows/
 dist/
 portable-test/
+build-macos-arm64/
+package-macos-arm64/
 
 # Visual Studio and MSVC output.
 /.vs/
