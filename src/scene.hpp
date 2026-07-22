@@ -195,6 +195,95 @@ public:
         }
     }
 
+    json transformDuplicate(const std::string& id, bool includeChildren) {
+        requireLoaded();
+        requireTransform(id);
+
+        std::unordered_set<std::string> selectedIds{id};
+        if (includeChildren) {
+            collectTransformChildren(selectedIds);
+        }
+
+        std::unordered_map<std::string, std::string> transformMapping;
+        std::unordered_map<std::string, std::string> geometryMapping;
+        std::unordered_map<const Base*, Base*> representationMapping;
+        std::vector<std::string> pending(selectedIds.begin(), selectedIds.end());
+        std::sort(pending.begin(), pending.end(), [&id](const std::string& lhs, const std::string& rhs) {
+            if (lhs == id || rhs == id) {
+                return lhs == id && rhs != id;
+            }
+            const auto left = lhs.find(':');
+            const auto right = rhs.find(':');
+            return std::stoull(lhs.substr(left + 1)) < std::stoull(rhs.substr(right + 1));
+        });
+
+        std::optional<std::string> duplicatedRootId;
+        try {
+            while (!pending.empty()) {
+                bool progressed = false;
+                for (auto iterator = pending.begin(); iterator != pending.end();) {
+                    Transform& source = requireTransform(*iterator);
+                    if (!internalParentsDuplicated(source, selectedIds, transformMapping)) {
+                        ++iterator;
+                        continue;
+                    }
+
+                    const ParentSelection parents = duplicateParents(source, transformMapping);
+                    const bool root = source.id() == id;
+                    const std::string duplicateId = duplicateTransformEntity(
+                        source,
+                        parents,
+                        root,
+                        representationMapping);
+                    transformMapping[source.id()] = duplicateId;
+                    if (root) {
+                        duplicatedRootId = duplicateId;
+                    }
+                    iterator = pending.erase(iterator);
+                    progressed = true;
+                }
+
+                if (!progressed) {
+                    throw SceneError(
+                        "INVALID_RELATION",
+                        "Transform graph contains a parent cycle that cannot be duplicated",
+                        json{{"id", id}});
+                }
+            }
+
+            cloneRepresentationStyles(representationMapping);
+            copyDuplicateRelations(transformMapping);
+            copyDuplicateTransformMaterials(transformMapping);
+            indexGeometries();
+            mapDuplicateNativeGeometries(representationMapping, geometryMapping);
+            duplicateEditorGeometries(transformMapping, geometryMapping);
+            refreshRelations();
+
+            json transformResult = json::object();
+            for (const auto& [sourceId, duplicateId] : transformMapping) {
+                transformResult[sourceId] = duplicateId;
+            }
+            json geometryResult = json::object();
+            for (const auto& [sourceId, duplicateId] : geometryMapping) {
+                geometryResult[sourceId] = duplicateId;
+            }
+            return json{
+                {"rootId", *duplicatedRootId},
+                {"transforms", std::move(transformResult)},
+                {"geometries", std::move(geometryResult)}};
+        } catch (...) {
+            if (duplicatedRootId.has_value() && transforms_.count(*duplicatedRootId) != 0) {
+                try {
+                    std::unordered_set<std::string> visiting;
+                    deleteTransformRecursive(*duplicatedRootId, visiting);
+                    refreshRelations();
+                } catch (...) {
+                }
+            }
+            throw;
+        }
+    }
+
     json transformUpdate(const std::string& id, const json& changes) {
         requireLoaded();
         Transform& target = requireTransform(id);
@@ -606,6 +695,393 @@ private:
     static std::string nextId(const std::string& prefix, std::uint64_t& counter) {
         ++counter;
         return prefix + ":" + std::to_string(counter);
+    }
+
+    using EntityMapper = std::function<Base*(Base*)>;
+
+    void copyAttributeValue(
+        Base* target,
+        std::size_t index,
+        const AttributeValue& value,
+        const EntityMapper& mapEntity) {
+        if (value.isNull()) {
+            target->unset_attribute_value(index);
+            return;
+        }
+
+        switch (value.type()) {
+            case IfcUtil::Argument_DERIVED:
+                target->set_attribute_value(index, Derived{});
+                return;
+            case IfcUtil::Argument_INT:
+                target->set_attribute_value(index, static_cast<int>(value));
+                return;
+            case IfcUtil::Argument_BOOL:
+                target->set_attribute_value(index, static_cast<bool>(value));
+                return;
+            case IfcUtil::Argument_LOGICAL: {
+                const boost::logic::tribool logical = value;
+                target->set_attribute_value(index, logical);
+                return;
+            }
+            case IfcUtil::Argument_DOUBLE:
+                target->set_attribute_value(index, static_cast<double>(value));
+                return;
+            case IfcUtil::Argument_STRING:
+                target->set_attribute_value(index, static_cast<std::string>(value));
+                return;
+            case IfcUtil::Argument_BINARY:
+                target->set_attribute_value(index, static_cast<boost::dynamic_bitset<>>(value));
+                return;
+            case IfcUtil::Argument_ENUMERATION:
+                target->set_attribute_value(index, static_cast<EnumerationReference>(value));
+                return;
+            case IfcUtil::Argument_ENTITY_INSTANCE:
+                target->set_attribute_value(index, mapEntity(static_cast<Base*>(value)));
+                return;
+            case IfcUtil::Argument_EMPTY_AGGREGATE:
+                target->set_attribute_value(index, empty_aggregate_t{});
+                return;
+            case IfcUtil::Argument_AGGREGATE_OF_INT:
+                target->set_attribute_value(index, static_cast<std::vector<int>>(value));
+                return;
+            case IfcUtil::Argument_AGGREGATE_OF_DOUBLE:
+                target->set_attribute_value(index, static_cast<std::vector<double>>(value));
+                return;
+            case IfcUtil::Argument_AGGREGATE_OF_STRING:
+                target->set_attribute_value(index, static_cast<std::vector<std::string>>(value));
+                return;
+            case IfcUtil::Argument_AGGREGATE_OF_BINARY:
+                target->set_attribute_value(index, static_cast<std::vector<boost::dynamic_bitset<>>>(value));
+                return;
+            case IfcUtil::Argument_AGGREGATE_OF_ENTITY_INSTANCE: {
+                const auto source = static_cast<boost::shared_ptr<aggregate_of_instance>>(value);
+                boost::shared_ptr<aggregate_of_instance> duplicate(new aggregate_of_instance);
+                duplicate->reserve(source->size());
+                for (Base* entity : aggregateToVector(source)) {
+                    duplicate->push(mapEntity(entity));
+                }
+                target->set_attribute_value(index, duplicate);
+                return;
+            }
+            case IfcUtil::Argument_AGGREGATE_OF_EMPTY_AGGREGATE:
+                target->set_attribute_value(index, empty_aggregate_of_aggregate_t{});
+                return;
+            case IfcUtil::Argument_AGGREGATE_OF_AGGREGATE_OF_INT:
+                target->set_attribute_value(index, static_cast<std::vector<std::vector<int>>>(value));
+                return;
+            case IfcUtil::Argument_AGGREGATE_OF_AGGREGATE_OF_DOUBLE:
+                target->set_attribute_value(index, static_cast<std::vector<std::vector<double>>>(value));
+                return;
+            case IfcUtil::Argument_AGGREGATE_OF_AGGREGATE_OF_ENTITY_INSTANCE: {
+                const auto source = static_cast<boost::shared_ptr<aggregate_of_aggregate_of_instance>>(value);
+                boost::shared_ptr<aggregate_of_aggregate_of_instance> duplicate(new aggregate_of_aggregate_of_instance);
+                for (auto outer = source->begin(); outer != source->end(); ++outer) {
+                    std::vector<Base*> values;
+                    values.reserve(outer->size());
+                    for (Base* entity : *outer) {
+                        values.push_back(mapEntity(entity));
+                    }
+                    duplicate->push(values);
+                }
+                target->set_attribute_value(index, duplicate);
+                return;
+            }
+            default:
+                throw SceneError(
+                    "INTERNAL_ERROR",
+                    "Unsupported IFC attribute type while duplicating a transform",
+                    json{{"ifcClass", target->declaration().name()}, {"attributeIndex", index}});
+        }
+    }
+
+    void copyEntityAttributes(
+        const Base* source,
+        Base* target,
+        const std::set<std::string>& excludedAttributes,
+        const EntityMapper& mapEntity) {
+        const auto* declaration = source->declaration().as_entity();
+        if (declaration == nullptr) {
+            throw SceneError(
+                "INTERNAL_ERROR",
+                "Cannot duplicate a non-entity IFC instance",
+                json{{"ifcClass", source->declaration().name()}});
+        }
+        const auto attributes = declaration->all_attributes();
+        for (std::size_t index = 0; index < attributes.size(); ++index) {
+            if (excludedAttributes.count(attributes[index]->name()) != 0) {
+                continue;
+            }
+            copyAttributeValue(target, index, source->get_attribute_value(index), mapEntity);
+        }
+    }
+
+    bool shareRepresentationReference(const std::string& attributeName, const Base* referenced) const {
+        if (referenced == nullptr || referenced->id() == 0) {
+            return true;
+        }
+        if (attributeName == "ContextOfItems" || attributeName == "MappingSource" || attributeName == "Styles") {
+            return true;
+        }
+        return isA(referenced, "IfcRepresentationContext") ||
+            isA(referenced, "IfcPresentationStyle") ||
+            isA(referenced, "IfcOwnerHistory") ||
+            isA(referenced, "IfcExternalReference");
+    }
+
+    Base* cloneRepresentationEntity(
+        Base* source,
+        std::unordered_map<const Base*, Base*>& mapping) {
+        if (source == nullptr || source->id() == 0) {
+            return source;
+        }
+        const auto existing = mapping.find(source);
+        if (existing != mapping.end()) {
+            return existing->second;
+        }
+
+        const auto* declaration = source->declaration().as_entity();
+        if (declaration == nullptr) {
+            return source;
+        }
+        Base* duplicate = createInstance(*file_, source->declaration().name());
+        mapping[source] = duplicate;
+        const auto attributes = declaration->all_attributes();
+        for (std::size_t index = 0; index < attributes.size(); ++index) {
+            const std::string attributeName = attributes[index]->name();
+            copyAttributeValue(
+                duplicate,
+                index,
+                source->get_attribute_value(index),
+                [this, &mapping, attributeName](Base* referenced) -> Base* {
+                    if (shareRepresentationReference(attributeName, referenced)) {
+                        return referenced;
+                    }
+                    return cloneRepresentationEntity(referenced, mapping);
+                });
+        }
+        return duplicate;
+    }
+
+    void cloneRepresentationStyles(const std::unordered_map<const Base*, Base*>& mapping) {
+        const std::vector<Base*> styledItems = instancesByType(*file_, "IfcStyledItem");
+        for (Base* styledItem : styledItems) {
+            Base* item = getEntityAttribute(styledItem, "Item");
+            const auto replacement = mapping.find(item);
+            if (replacement == mapping.end()) {
+                continue;
+            }
+            Base* duplicate = createInstance(*file_, styledItem->declaration().name());
+            copyEntityAttributes(
+                styledItem,
+                duplicate,
+                {},
+                [&mapping](Base* referenced) -> Base* {
+                    const auto iterator = mapping.find(referenced);
+                    return iterator == mapping.end() ? referenced : iterator->second;
+                });
+        }
+    }
+
+    bool internalParentsDuplicated(
+        const Transform& source,
+        const std::unordered_set<std::string>& selectedIds,
+        const std::unordered_map<std::string, std::string>& mapping) const {
+        for (const auto* parentId : {
+                 &source.spatialParentId(),
+                 &source.placementParentId(),
+                 &source.decompositionParentId()}) {
+            if (parentId->has_value() &&
+                selectedIds.count(**parentId) != 0 &&
+                mapping.count(**parentId) == 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    Transform* duplicateParent(
+        const std::optional<std::string>& sourceParentId,
+        const std::unordered_map<std::string, std::string>& mapping) {
+        if (!sourceParentId.has_value()) {
+            return nullptr;
+        }
+        const auto duplicate = mapping.find(*sourceParentId);
+        return duplicate == mapping.end() ?
+            &requireTransform(*sourceParentId) :
+            &requireTransform(duplicate->second);
+    }
+
+    ParentSelection duplicateParents(
+        const Transform& source,
+        const std::unordered_map<std::string, std::string>& mapping) {
+        return ParentSelection{
+            duplicateParent(source.spatialParentId(), mapping),
+            duplicateParent(source.placementParentId(), mapping),
+            duplicateParent(source.decompositionParentId(), mapping)};
+    }
+
+    std::string duplicateTransformEntity(
+        Transform& source,
+        const ParentSelection& parents,
+        bool renameRoot,
+        std::unordered_map<const Base*, Base*>& representationMapping) {
+        Base* sourceEntity = source.entity();
+        if (isA(sourceEntity, "IfcProject")) {
+            throw SceneError(
+                "TRANSFORM_NOT_DUPLICABLE",
+                "IfcProject transforms cannot be duplicated",
+                json{{"id", source.id()}});
+        }
+        Base* sourcePlacement = source.objectPlacement();
+        if (sourcePlacement != nullptr && !isA(sourcePlacement, "IfcLocalPlacement")) {
+            throw SceneError(
+                "TRANSFORM_NOT_DUPLICABLE",
+                "Only transforms using IfcLocalPlacement can be duplicated",
+                json{{"id", source.id()}, {"sourceType", source.placementSourceType()}});
+        }
+
+        Base* duplicate = createInstance(*file_, sourceEntity->declaration().name());
+        copyEntityAttributes(
+            sourceEntity,
+            duplicate,
+            {"GlobalId", "ObjectPlacement", "Representation"},
+            [](Base* referenced) -> Base* { return referenced; });
+
+        if (hasAttribute(duplicate, "GlobalId")) {
+            IfcParse::IfcGlobalId globalId;
+            setAttribute(duplicate, "GlobalId", static_cast<const std::string&>(globalId));
+        }
+        if (renameRoot && hasAttribute(duplicate, "Name")) {
+            const std::string sourceName = source.name();
+            setAttribute(duplicate, "Name", sourceName.empty() ? "Copy" : sourceName + " Copy");
+        }
+        if (hasAttribute(duplicate, "ObjectPlacement")) {
+            if (sourcePlacement == nullptr) {
+                unsetAttribute(duplicate, "ObjectPlacement");
+            } else {
+                setEntityAttribute(
+                    duplicate,
+                    "ObjectPlacement",
+                    createLocalPlacement(
+                        *file_,
+                        parents.placement == nullptr ? nullptr : parents.placement->objectPlacement(),
+                        source.localMatrix()));
+            }
+        }
+        if (hasAttribute(duplicate, "Representation")) {
+            Base* representation = getEntityAttribute(sourceEntity, "Representation");
+            if (representation == nullptr) {
+                unsetAttribute(duplicate, "Representation");
+            } else {
+                setEntityAttribute(
+                    duplicate,
+                    "Representation",
+                    cloneRepresentationEntity(representation, representationMapping));
+            }
+        }
+
+        Entity* duplicateEntity = asEntity(duplicate);
+        if (duplicateEntity == nullptr) {
+            file_->removeEntity(duplicate);
+            throw SceneError(
+                "INTERNAL_ERROR",
+                "Duplicated IFC transform is not an entity",
+                json{{"ifcClass", sourceEntity->declaration().name()}});
+        }
+
+        const std::string duplicateId = nextId("transform", transformCounter_);
+        transforms_.emplace(duplicateId, std::make_unique<Transform>(duplicateId, duplicateEntity));
+        transformByEntity_[duplicate] = duplicateId;
+        replaceSpatialParent(duplicate, parents.spatial == nullptr ? nullptr : parents.spatial->entity());
+        replaceDecompositionParent(duplicate, parents.decomposition == nullptr ? nullptr : parents.decomposition->entity());
+        replaceOccurrenceProperties(*file_, duplicate, readOccurrenceProperties(*file_, sourceEntity));
+        return duplicateId;
+    }
+
+    void copyDuplicateRelations(const std::unordered_map<std::string, std::string>& mapping) {
+        for (const auto& [sourceId, duplicateId] : mapping) {
+            Base* source = requireTransform(sourceId).entity();
+            Base* duplicate = requireTransform(duplicateId).entity();
+            const std::vector<Base*> references = aggregateToVector(
+                file_->instances_by_reference(static_cast<int>(source->id())));
+            for (Base* relation : references) {
+                if (relation == nullptr ||
+                    !isA(relation, "IfcRelationship") ||
+                    !hasAttribute(relation, "RelatedObjects") ||
+                    !aggregateContains(getEntityAggregate(relation, "RelatedObjects"), source)) {
+                    continue;
+                }
+                if (isA(relation, "IfcRelContainedInSpatialStructure") ||
+                    isA(relation, "IfcRelAggregates") ||
+                    isA(relation, "IfcRelNests") ||
+                    isA(relation, "IfcRelAssociatesMaterial")) {
+                    continue;
+                }
+                if (isA(relation, "IfcRelDefinesByProperties")) {
+                    Base* definition = getEntityAttribute(relation, "RelatingPropertyDefinition");
+                    const auto relatedObjects = getEntityAggregate(relation, "RelatedObjects");
+                    if (definition != nullptr &&
+                        isA(definition, "IfcPropertySet") &&
+                        relatedObjects != nullptr &&
+                        relatedObjects->size() == 1) {
+                        continue;
+                    }
+                }
+                appendUniqueToAggregate(relation, "RelatedObjects", duplicate);
+            }
+        }
+    }
+
+    void copyDuplicateTransformMaterials(const std::unordered_map<std::string, std::string>& mapping) {
+        for (const auto& [sourceId, duplicateId] : mapping) {
+            Transform& source = requireTransform(sourceId);
+            Transform& duplicate = requireTransform(duplicateId);
+            for (const std::string& materialId : source.materialIds()) {
+                assignSemanticMaterial(requireMaterial(materialId).entity(), duplicate.entity());
+            }
+        }
+    }
+
+    void mapDuplicateNativeGeometries(
+        const std::unordered_map<const Base*, Base*>& representationMapping,
+        std::unordered_map<std::string, std::string>& geometryMapping) const {
+        for (const auto& [sourceEntity, duplicateEntity] : representationMapping) {
+            const auto sourceGeometry = geometryByEntity_.find(sourceEntity);
+            const auto duplicateGeometry = geometryByEntity_.find(duplicateEntity);
+            if (sourceGeometry == geometryByEntity_.end() ||
+                duplicateGeometry == geometryByEntity_.end()) {
+                continue;
+            }
+            geometryMapping[sourceGeometry->second] = duplicateGeometry->second;
+        }
+    }
+
+    void duplicateEditorGeometries(
+        const std::unordered_map<std::string, std::string>& transformMapping,
+        std::unordered_map<std::string, std::string>& geometryMapping) {
+        for (const auto& [sourceTransformId, duplicateTransformId] : transformMapping) {
+            const std::vector<std::string> sourceGeometryIds = requireTransform(sourceTransformId).geometryIds();
+            for (const std::string& sourceGeometryId : sourceGeometryIds) {
+                Geometry& source = requireGeometry(sourceGeometryId);
+                if (!source.isEditorGeometry()) {
+                    continue;
+                }
+                const std::vector<std::string> materialIds = source.materialIds();
+                const json duplicate = geometryCreate(
+                    duplicateTransformId,
+                    source.name(),
+                    json{{"space", "parent"}, {"matrix", matrixToJson(source.localMatrix())}},
+                    profileToJson(source.profile()),
+                    source.depth(),
+                    source.operation());
+                const std::string duplicateGeometryId = duplicate.at("id").get<std::string>();
+                geometryMapping[sourceGeometryId] = duplicateGeometryId;
+                for (const std::string& materialId : materialIds) {
+                    materialAssign(materialId, duplicateGeometryId);
+                }
+            }
+        }
     }
 
     void clear() {

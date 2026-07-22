@@ -243,6 +243,12 @@ void validateCommand(const ProtocolRequest& request) {
         validateSessionId(params.at("id"), "id", {"transform"});
         return;
     }
+    if (command == "transformDuplicate") {
+        requireExactFields(params, {"id", "includeChildren"});
+        validateSessionId(params.at("id"), "id", {"transform"});
+        requireBoolean(params, "includeChildren");
+        return;
+    }
     if (command == "transformCreate") {
         requireExactFields(params, {"name", "parents", "transform", "properties"});
         requireString(params, "name");
@@ -372,7 +378,7 @@ json helpResult() {
         "Success: {\"id\":...,\"ok\":true,\"result\":...}\n"
         "Error: {\"id\":...,\"ok\":false,\"error\":{\"code\":...,\"message\":...,\"details\":{...}}}\n"
         "Commands: help, getCapabilities, load, save, exit, transformGetAll, transformGet, "
-        "transformCreate, transformUpdate, transformDelete, transformTessellate, geometryGetAll, "
+        "transformCreate, transformDuplicate, transformUpdate, transformDelete, transformTessellate, geometryGetAll, "
         "geometryGet, geometryCreate, geometryUpdate, geometryDelete, materialGetAll, materialGet, "
         "materialCreate, materialUpdate, materialDelete, materialAssign, materialUnassign.";
     return json{{"documentation", documentation}};
@@ -414,6 +420,11 @@ json dispatchSingle(IfcScene& scene, const ProtocolRequest& request) {
             params.at("parents"),
             params.at("transform"),
             params.at("properties"));
+    }
+    if (command == "transformDuplicate") {
+        return scene.transformDuplicate(
+            params.at("id").get<std::string>(),
+            params.at("includeChildren").get<bool>());
     }
     if (command == "transformUpdate") {
         return scene.transformUpdate(params.at("id").get<std::string>(), params);
