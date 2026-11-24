@@ -1254,56 +1254,146 @@ public:
         return geometryGet(id);
     }
 
-    json geometryUpdate(const std::string& id, const json& changes) {
+        json geometryUpdate(const std::string& id, const json& changes) {
         requireLoaded();
+
         Geometry& geometry = requireGeometry(id);
+
         if (!geometry.editable()) {
-            throw SceneError("GEOMETRY_NOT_EDITABLE", "Geometry is not editable", json{{"id", id}});
-        }
-        if (geometry.isDomain() && changes.contains("operation") &&
-            changes.at("operation").get<std::string>() != "ADD") {
             throw SceneError(
-                "INVALID_PARAMETERS",
-                "Domain operation must be ADD");
+                "GEOMETRY_NOT_EDITABLE",
+                "Geometry is not editable",
+                json{{"id", id}});
+        }
+
+        std::optional<std::string> name;
+        std::optional<Matrix4> local;
+        std::optional<Profile2D> profile;
+        std::optional<double> depth;
+        std::optional<std::string> operation;
+
+        // Validate all requested changes before modifying the IFC model.
+
+        if (changes.contains("operation")) {
+            operation = changes.at("operation").get<std::string>();
+
+            if (geometry.isDomain() && *operation != "ADD") {
+                throw SceneError(
+                    "INVALID_PARAMETERS",
+                    "Domain operation must be ADD");
+            }
+
+            if (*operation != "ADD" && *operation != "SUBTRACT") {
+                throw SceneError(
+                    "INVALID_PARAMETERS",
+                    "Geometry operation must be ADD or SUBTRACT");
+            }
+
+            if (*operation != geometry.operation() &&
+                !canReceiveOperation(geometry.parent(), *operation)) {
+                throw SceneError(
+                    "GEOMETRY_OPERATION_NOT_SUPPORTED",
+                    "Target transform cannot receive the requested geometry operation",
+                    json{
+                        {"operation", *operation},
+                        {"ifcClass", geometry.parent()->declaration().name()}
+                    });
+            }
         }
 
         if (changes.contains("name")) {
-            geometry.setName(changes.at("name").get<std::string>());
+            name = changes.at("name").get<std::string>();
         }
+
         if (changes.contains("transform")) {
             const json& input = changes.at("transform");
-            Matrix4 requested = matrixFromJson(input.at("matrix"));
+
+            const Matrix4 requested =
+                matrixFromJson(input.at("matrix"));
+
             validateRigidMatrix(requested);
-            Matrix4 local = requested;
+
             if (input.at("space").get<std::string>() == "world") {
-                local = multiplyMatrix(inverseRigidMatrix(transformWorldMatrix(requireTransform(geometry.parentId()))), requested);
+                local = multiplyMatrix(
+                    inverseRigidMatrix(
+                        transformWorldMatrix(
+                            requireTransform(geometry.parentId()))),
+                    requested);
+            } else {
+                local = requested;
             }
-            Base* previous = geometry.replacePlacement(*file_, local);
+
+            validateRigidMatrix(*local);
+        }
+
+        if (changes.contains("profile")) {
+            profile = profileFromJson(changes.at("profile"));
+
+            validateProfile(*profile);
+        }
+
+        if (changes.contains("depth")) {
+            depth = changes.at("depth").get<double>();
+
+            if (!std::isfinite(*depth) || *depth <= 0.0) {
+                throw SceneError(
+                    "INVALID_PROFILE",
+                    "Extrusion depth must be a finite strictly positive number");
+            }
+        }
+
+        if ((profile.has_value() || depth.has_value()) &&
+            findExtrudedSolid(geometry.entity()) == nullptr) {
+            throw SceneError(
+                "GEOMETRY_NOT_EDITABLE",
+                "Geometry has no editable IfcExtrudedAreaSolid",
+                json{{"id", id}});
+        }
+
+        // Apply changes only after successful validation.
+
+        if (name.has_value()) {
+            geometry.setName(*name);
+        }
+
+        if (local.has_value()) {
+            Base* previous = geometry.replacePlacement(*file_, *local);
+
             removePlacementIfUnreferenced(previous);
         }
-        if (changes.contains("profile")) {
-            const Profile2D profile = profileFromJson(changes.at("profile"));
-            validateProfile(profile);
-            geometry.setProfile(*file_, profile);
+
+        if (profile.has_value()) {
+            geometry.setProfile(*file_, *profile);
         }
-        if (changes.contains("depth")) {
-            geometry.setDepth(changes.at("depth").get<double>());
+
+        if (depth.has_value()) {
+            geometry.setDepth(*depth);
         }
-        if (changes.contains("operation")) {
+
+        if (operation.has_value()) {
             Base* previousEntity = geometry.entity();
-            const std::vector<Base*> obsolete = geometry.convertOperation(*file_, changes.at("operation").get<std::string>());
+
+            const std::vector<Base*> obsolete =
+                geometry.convertOperation(*file_, *operation);
+
             if (geometry.entity() != previousEntity) {
-                replaceSemanticAssignmentTarget(previousEntity, geometry.entity());
+                replaceSemanticAssignmentTarget(
+                    previousEntity,
+                    geometry.entity());
+
                 geometryByEntity_.erase(previousEntity);
                 geometryByEntity_[geometry.entity()] = id;
             }
+
             for (Base* entity : obsolete) {
                 if (entity != nullptr) {
                     file_->removeEntity(entity);
                 }
             }
         }
+
         refreshRelations();
+
         return geometryGet(id);
     }
 
