@@ -686,42 +686,212 @@ inline std::optional<std::string> globalIdOf(const Base* entity) {
     return entity != nullptr && hasAttribute(entity, "GlobalId") ? getOptionalString(entity, "GlobalId") : std::nullopt;
 }
 
-inline Base* createIfcValue(IfcParse::IfcFile& file, const std::string& valueType, const json& value) {
-    if (value.is_null()) {
-        return nullptr;
-    }
+inline Base* createIfcValue(
+    IfcParse::IfcFile& file,
+    const std::string& valueType,
+    const json& value) {
 
-    Base* typedValue = nullptr;
+    const IfcParse::declaration* declaration = nullptr;
+
     try {
-        typedValue = file.create(file.schema()->declaration_by_name(valueType));
+        declaration = file.schema()->declaration_by_name(valueType);
     } catch (const std::exception& exception) {
         throw SceneError(
             "INVALID_PARAMETERS",
             "Unknown IFC value type " + valueType,
-            json{{"valueType", valueType}, {"reason", exception.what()}});
-    }
-    if (typedValue == nullptr || typedValue->declaration().as_type_declaration() == nullptr) {
-        throw SceneError("INVALID_PARAMETERS", "valueType must name an IFC simple type", json{{"valueType", valueType}});
+            json{
+                {"valueType", valueType},
+                {"reason", exception.what()}
+            });
     }
 
-    if (value.is_boolean()) {
-        typedValue->set_attribute_value(0, value.get<bool>());
-    } else if (value.is_number_integer()) {
-        if (valueType == "IfcInteger" || valueType == "IfcCountMeasure") {
-            typedValue->set_attribute_value(0, value.get<int>());
-        } else {
-            typedValue->set_attribute_value(0, value.get<double>());
-        }
-    } else if (value.is_number_float()) {
-        typedValue->set_attribute_value(0, value.get<double>());
-    } else if (value.is_string()) {
-        typedValue->set_attribute_value(0, value.get<std::string>());
-    } else {
+    const auto* typeDeclaration = declaration == nullptr
+        ? nullptr
+        : declaration->as_type_declaration();
+
+    if (typeDeclaration == nullptr) {
         throw SceneError(
             "INVALID_PARAMETERS",
-            "Property value must be a string, number, boolean or null",
+            "valueType must name an IFC simple type",
             json{{"valueType", valueType}});
     }
+
+    const IfcParse::parameter_type* parameter =
+        typeDeclaration->declared_type();
+
+    while (parameter != nullptr) {
+        const auto* namedType = parameter->as_named_type();
+
+        if (namedType == nullptr) {
+            break;
+        }
+
+        const auto* referencedDeclaration = namedType->declared_type();
+
+        const auto* referencedType = referencedDeclaration == nullptr
+            ? nullptr
+            : referencedDeclaration->as_type_declaration();
+
+        if (referencedType == nullptr) {
+            parameter = nullptr;
+            break;
+        }
+
+        parameter = referencedType->declared_type();
+    }
+
+    const auto* simpleType = parameter == nullptr
+        ? nullptr
+        : parameter->as_simple_type();
+
+    if (simpleType == nullptr) {
+        throw SceneError(
+            "INVALID_PARAMETERS",
+            "IFC value type does not support scalar values",
+            json{{"valueType", valueType}});
+    }
+
+    if (value.is_null()) {
+        return nullptr;
+    }
+
+    const auto primitiveType = simpleType->declared_type();
+
+    const auto rejectValue = [&]() {
+        throw SceneError(
+            "INVALID_PARAMETERS",
+            "Property value is incompatible with IFC type " + valueType,
+            json{
+                {"valueType", valueType},
+                {"value", value},
+                {"jsonType", value.type_name()}
+            });
+    };
+
+    switch (primitiveType) {
+        case IfcParse::simple_type::boolean_type:
+        case IfcParse::simple_type::logical_type:
+            if (!value.is_boolean()) {
+                rejectValue();
+            }
+            break;
+
+        case IfcParse::simple_type::integer_type:
+            if (!value.is_number_integer()) {
+                rejectValue();
+            }
+
+            if (
+                value.get<long double>() <
+                    std::numeric_limits<int>::min() ||
+                value.get<long double>() >
+                    std::numeric_limits<int>::max()
+            ) {
+                rejectValue();
+            }
+            break;
+
+        case IfcParse::simple_type::real_type:
+        case IfcParse::simple_type::number_type:
+            if (
+                !value.is_number() ||
+                !std::isfinite(value.get<double>())
+            ) {
+                rejectValue();
+            }
+            break;
+
+        case IfcParse::simple_type::string_type:
+            if (!value.is_string()) {
+                rejectValue();
+            }
+            break;
+
+        case IfcParse::simple_type::binary_type:
+            if (!value.is_string()) {
+                rejectValue();
+            }
+            break;
+
+        default:
+            rejectValue();
+    }
+
+    Base* typedValue = nullptr;
+
+    try {
+        typedValue = file.create(declaration);
+
+        if (typedValue == nullptr) {
+            throw SceneError(
+                "INTERNAL_ERROR",
+                "IfcOpenShell failed to instantiate " + valueType,
+                json{{"valueType", valueType}});
+        }
+
+        switch (primitiveType) {
+            case IfcParse::simple_type::boolean_type:
+                typedValue->set_attribute_value(
+                    0,
+                    value.get<bool>());
+                break;
+
+            case IfcParse::simple_type::logical_type:
+                typedValue->set_attribute_value(
+                    0,
+                    boost::logic::tribool(value.get<bool>()));
+                break;
+
+            case IfcParse::simple_type::integer_type:
+                typedValue->set_attribute_value(
+                    0,
+                    value.get<int>());
+                break;
+
+            case IfcParse::simple_type::real_type:
+            case IfcParse::simple_type::number_type:
+                if (
+                    declaration->name() == "IfcCountMeasure" &&
+                    value.is_number_integer() &&
+                    value.get<long double>() >=
+                        std::numeric_limits<int>::min() &&
+                    value.get<long double>() <=
+                        std::numeric_limits<int>::max()
+                ) {
+                    typedValue->set_attribute_value(
+                        0,
+                        value.get<int>());
+                } else {
+                    typedValue->set_attribute_value(
+                        0,
+                        value.get<double>());
+                }
+                break;
+
+            case IfcParse::simple_type::string_type:
+            case IfcParse::simple_type::binary_type:
+                typedValue->set_attribute_value(
+                    0,
+                    value.get<std::string>());
+                break;
+
+            default:
+                rejectValue();
+        }
+
+    } catch (const SceneError&) {
+        throw;
+    } catch (const std::exception& exception) {
+        throw SceneError(
+            "INVALID_PARAMETERS",
+            "Unable to assign property value to IFC type " + valueType,
+            json{
+                {"valueType", valueType},
+                {"value", value},
+                {"reason", exception.what()}
+            });
+    }
+
     return typedValue;
 }
 
@@ -997,60 +1167,192 @@ inline void removeUniqueIfUnreferenced(IfcParse::IfcFile& file, const std::vecto
     }
 }
 
-inline void replaceOccurrenceProperties(IfcParse::IfcFile& file, Base* object, const json& properties) {
+inline void replaceOccurrenceProperties(
+    IfcParse::IfcFile& file,
+    Base* object,
+    const json& properties) {
+
     std::map<std::string, std::map<std::string, json>> desired;
+
     for (const auto& property : properties) {
-        desired[property.at("propertySet").get<std::string>()][property.at("name").get<std::string>()] = property;
+        desired[property.at("propertySet").get<std::string>()]
+            [property.at("name").get<std::string>()] = property;
     }
 
     std::set<std::string> handledSets;
-    std::vector<Base*> entitiesToRemove;
-    for (Base* relation : instancesByType(file, "IfcRelDefinesByProperties")) {
-        const auto relatedObjects = getEntityAggregate(relation, "RelatedObjects");
-        if (!aggregateContains(relatedObjects, object) || relatedObjects->size() != 1) {
+
+    std::vector<Base*> relationsToRemove;
+    std::vector<Base*> propertySetsToRemove;
+    std::vector<Base*> propertiesToRemove;
+
+    for (Base* relation : instancesByType(
+        file,
+        "IfcRelDefinesByProperties")) {
+
+        const auto relatedObjects =
+            getEntityAggregate(relation, "RelatedObjects");
+
+        if (
+            !aggregateContains(relatedObjects, object) ||
+            relatedObjects->size() != 1
+        ) {
             continue;
         }
-        Base* propertySet = getEntityAttribute(relation, "RelatingPropertyDefinition");
-        if (propertySet == nullptr || !isA(propertySet, "IfcPropertySet")) {
+
+        Base* propertySet = getEntityAttribute(
+            relation,
+            "RelatingPropertyDefinition");
+
+        if (
+            propertySet == nullptr ||
+            !isA(propertySet, "IfcPropertySet")
+        ) {
             continue;
         }
-        const std::string setName = getString(propertySet, "Name");
+
+        const std::string setName = getString(
+            propertySet,
+            "Name");
+
         handledSets.insert(setName);
-        auto currentProperties = aggregateToVector(getEntityAggregate(propertySet, "HasProperties"));
+
+        const bool sharedPropertySet =
+            file.getTotalInverses(propertySet->id()) > 1;
+
+        const auto currentProperties = aggregateToVector(
+            getEntityAggregate(propertySet, "HasProperties"));
+
         std::vector<Base*> nextProperties;
         std::set<std::string> updated;
 
+        const auto setIterator = desired.find(setName);
+
         for (Base* current : currentProperties) {
+            // Preserve unsupported native IFC properties.
             if (!isA(current, "IfcPropertySingleValue")) {
                 nextProperties.push_back(current);
                 continue;
             }
-            const std::string propertyName = getString(current, "Name");
-            const auto setIterator = desired.find(setName);
-            const auto propertyIterator = setIterator == desired.end() ? std::map<std::string, json>::const_iterator() : setIterator->second.find(propertyName);
-            if (setIterator != desired.end() && propertyIterator != setIterator->second.end()) {
-                updatePropertySingleValue(file, current, propertyIterator->second);
-                nextProperties.push_back(current);
-                updated.insert(propertyName);
-            } else {
-                entitiesToRemove.push_back(current);
+
+            const std::string propertyName = getString(
+                current,
+                "Name");
+
+            if (setIterator == desired.end()) {
+                propertiesToRemove.push_back(current);
+                continue;
             }
+
+            const auto propertyIterator =
+                setIterator->second.find(propertyName);
+
+            if (propertyIterator == setIterator->second.end()) {
+                propertiesToRemove.push_back(current);
+                continue;
+            }
+
+            const bool sharedProperty =
+                file.getTotalInverses(current->id()) > 1;
+
+            if (sharedPropertySet || sharedProperty) {
+                // Copy editable properties instead of mutating shared data.
+                Base* replacement = createPropertySingleValue(
+                    file,
+                    propertyIterator->second);
+
+                nextProperties.push_back(replacement);
+                propertiesToRemove.push_back(current);
+
+            } else {
+                updatePropertySingleValue(
+                    file,
+                    current,
+                    propertyIterator->second);
+
+                nextProperties.push_back(current);
+            }
+
+            updated.insert(propertyName);
         }
 
-        const auto setIterator = desired.find(setName);
         if (setIterator != desired.end()) {
-            for (const auto& [propertyName, property] : setIterator->second) {
+            for (const auto& [propertyName, property] :
+                setIterator->second) {
+
                 if (updated.count(propertyName) == 0) {
-                    nextProperties.push_back(createPropertySingleValue(file, property));
+                    nextProperties.push_back(
+                        createPropertySingleValue(file, property));
                 }
             }
         }
 
         if (nextProperties.empty()) {
-            entitiesToRemove.push_back(relation);
-            entitiesToRemove.push_back(propertySet);
+            // Detach only the relationship owned by this occurrence.
+            relationsToRemove.push_back(relation);
+            propertySetsToRemove.push_back(propertySet);
+            continue;
+        }
+
+        if (sharedPropertySet) {
+            // Avoid creating a replacement when the set is unchanged.
+            if (nextProperties == currentProperties) {
+                continue;
+            }
+
+            Base* replacement = createInstance(
+                file,
+                "IfcPropertySet");
+
+            initializeRoot(
+                file,
+                replacement,
+                setName);
+
+            // Preserve metadata while assigning a new GlobalId.
+            const auto description = getOptionalString(
+                propertySet,
+                "Description");
+
+            if (description.has_value()) {
+                setAttribute(
+                    replacement,
+                    "Description",
+                    *description);
+            }
+
+            Base* ownerHistory = getEntityAttribute(
+                propertySet,
+                "OwnerHistory");
+
+            if (ownerHistory != nullptr) {
+                setEntityAttribute(
+                    replacement,
+                    "OwnerHistory",
+                    ownerHistory);
+            } else {
+                unsetAttribute(
+                    replacement,
+                    "OwnerHistory");
+            }
+
+            setAttribute(
+                replacement,
+                "HasProperties",
+                makeAggregate(nextProperties));
+
+            // Redirect only the relationship of the edited occurrence.
+            setEntityAttribute(
+                relation,
+                "RelatingPropertyDefinition",
+                replacement);
+
+            propertySetsToRemove.push_back(propertySet);
+
         } else {
-            setAttribute(propertySet, "HasProperties", makeAggregate(nextProperties));
+            setAttribute(
+                propertySet,
+                "HasProperties",
+                makeAggregate(nextProperties));
         }
     }
 
@@ -1058,27 +1360,64 @@ inline void replaceOccurrenceProperties(IfcParse::IfcFile& file, Base* object, c
         if (handledSets.count(setName) != 0) {
             continue;
         }
+
         std::vector<Base*> propertyInstances;
+
         for (const auto& [propertyName, property] : setProperties) {
             static_cast<void>(propertyName);
-            propertyInstances.push_back(createPropertySingleValue(file, property));
-        }
-        Base* propertySet = createInstance(file, "IfcPropertySet");
-        initializeRoot(file, propertySet, setName);
-        setAttribute(propertySet, "HasProperties", makeAggregate(propertyInstances));
 
-        Base* relation = createInstance(file, "IfcRelDefinesByProperties");
-        initializeRoot(file, relation, std::string());
-        setAttribute(relation, "RelatedObjects", makeAggregate({object}));
-        setEntityAttribute(relation, "RelatingPropertyDefinition", propertySet);
+            propertyInstances.push_back(
+                createPropertySingleValue(file, property));
+        }
+
+        Base* propertySet = createInstance(
+            file,
+            "IfcPropertySet");
+
+        initializeRoot(
+            file,
+            propertySet,
+            setName);
+
+        setAttribute(
+            propertySet,
+            "HasProperties",
+            makeAggregate(propertyInstances));
+
+        Base* relation = createInstance(
+            file,
+            "IfcRelDefinesByProperties");
+
+        initializeRoot(
+            file,
+            relation,
+            std::string());
+
+        setAttribute(
+            relation,
+            "RelatedObjects",
+            makeAggregate({object}));
+
+        setEntityAttribute(
+            relation,
+            "RelatingPropertyDefinition",
+            propertySet);
     }
 
-    std::unordered_set<Base*> uniqueRemoval(entitiesToRemove.begin(), entitiesToRemove.end());
-    for (Base* entity : uniqueRemoval) {
-        if (entity != nullptr && file.instance_by_id(entity->id()) == entity) {
-            file.removeEntity(entity);
-        }
-    }
+    // Remove relationships before their property sets.
+    removeUniqueIfUnreferenced(
+        file,
+        relationsToRemove);
+
+    // Remove property sets before their dependent properties.
+    removeUniqueIfUnreferenced(
+        file,
+        propertySetsToRemove);
+
+    // Preserve properties still referenced by other IFC entities.
+    removeUniqueIfUnreferenced(
+        file,
+        propertiesToRemove);
 }
 
 class Transform {
