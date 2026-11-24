@@ -5,7 +5,7 @@
 `ifc-cli` is a persistent process communicating through **JSONL**:
 
 * input: one JSON request per line on `stdin`;
-* output: one JSON response per line on `stdout`;
+* output: one JSON response per line on `stdout`, with multiple responses for successful tessellation requests;
 * only one IFC file is loaded at a time;
 * all commands using the loaded model must be sent to the same process.
 
@@ -91,6 +91,7 @@ A transform represents an IFC object in the scene.
 | `transformUpdate`     | see below                | Updates a transform                                |
 | `transformDelete`     | `{"id":"transform:42"}`  | Recursively deletes the transform and its children |
 | `transformTessellate` | see tessellation section | Generates the final triangle mesh                  |
+| `transformDuplicate` | `{"id":"transform:42","includeChildren":true}` | Duplicates a transform and optionally its descendants |
 
 Create:
 
@@ -411,6 +412,171 @@ Property:
 For material properties, `source` must be `material`.
 
 ---
+
+## Advanced operation semantics
+
+### Transform duplication
+
+The `transformDuplicate` command duplicates a transform and optionally its descendants.
+
+Parameters:
+
+```json
+{
+  "id":"transform:42",
+  "includeChildren":true
+}
+```
+
+Result:
+
+```json
+{
+  "rootId":"transform:100",
+  "transforms":{
+    "transform:42":"transform:100"
+  },
+  "geometries":{
+    "geometry:17":"geometry:101"
+  }
+}
+```
+
+The result maps source session identifiers to their duplicated counterparts.
+
+The duplicated root receives a new name with a ` Copy` suffix and a new IFC GlobalId.
+
+Duplicated entities preserve their native IFC class, supported attributes, geometry representations, material assignments and occurrence property graphs.
+
+Exclusive occurrence property sets and their properties are independently duplicated, including complex native properties.
+
+Shared property relationships, type definitions, quantities and material references retain their existing sharing semantics.
+
+Managed simulation domains are duplicated independently of physical geometries.
+
+IfcProject objects and transforms using unsupported placement types cannot be duplicated. These operations return `TRANSFORM_NOT_DUPLICABLE`.
+
+The selected hierarchy is validated before duplication begins.
+
+### Physical boolean operations
+
+Physical geometry operations are evaluated during tessellation.
+
+For each affected product, the physical result is computed as:
+
+```text
+physical = union(base, additions) - union(subtractions)
+```
+
+Additions are applied before subtractions, regardless of creation order.
+
+Both native and API-created IFC projection and opening relationships are considered.
+
+Boolean operations are performed on OpenCascade BRep geometry before triangulation.
+
+The original IFC representations and feature relationships remain unchanged.
+
+A complete subtraction produces a valid empty mesh.
+
+Physical geometries belonging to different transforms are not globally merged.
+
+Simulation domains never participate in physical boolean operations.
+
+### Property validation
+
+Property values must be compatible with their declared IFC scalar type.
+
+For example:
+
+* `IfcInteger` requires an integer.
+* `IfcBoolean` requires a boolean.
+* `IfcReal` requires a finite numeric value.
+* `IfcLabel` requires a string.
+
+A property unit must reference a compatible unit name available in the loaded IFC model.
+
+Invalid IFC value types, incompatible scalar values and unknown units return `INVALID_PARAMETERS`.
+
+Updating occurrence properties preserves unsupported native properties and avoids modifying property sets still shared by other objects.
+
+### Mutation pre-validation
+
+Creation and update commands validate their supported parameters before applying modifications to the IFC model.
+
+This includes:
+
+* IFC property types and values;
+* property unit references;
+* placement matrices;
+* polygon profiles;
+* geometry operations;
+* material appearance parameters;
+* parent relationship compatibility.
+
+Recursive duplication also validates the selected hierarchy before creating duplicates.
+
+Requests rejected during pre-validation leave the existing IFC model and session indexes unchanged.
+
+This does not constitute a general transactional rollback mechanism. Unexpected errors occurring during IFC mutation may still require application-level recovery.
+
+A failed `load` operation does not restore the previously loaded model.
+
+### Schema compatibility
+
+The `getCapabilities` command returns the actual IFC schemas available in the current executable, excluding internal STEP header schemas.
+
+IFC2X3 materials use `IfcExtendedMaterialProperties`.
+
+IFC4 and later schemas use `IfcMaterialProperties`.
+
+Material categories are stored in editor metadata when the native IFC material entity does not provide a Category attribute.
+
+Managed simulation domains require a schema supporting `IfcSpatialZone` and cannot be created in IFC2X3.
+
+### Entity deletion
+
+Deletion operations remove the selected entities and their supported exclusively owned dependencies.
+
+Geometry representation dependencies, local placement dependencies, occurrence properties and material presentation styles are cleaned up when no references remain.
+
+Shared dependencies are preserved while other entities reference them.
+
+Deletion is destructive and does not provide an undo operation.
+
+### Mesh response handling
+
+The JSONL protocol is synchronous.
+
+Normal commands return a single response. Successful tessellation commands return multiple responses sharing the request identifier.
+
+The client must wait for the final `mesh.end` event before treating a mesh response as complete.
+
+An error response terminates the failed request.
+
+Mesh offsets refer to scalar positions in the corresponding arrays, not vertex or triangle identifiers.
+
+Mesh data is currently computed before the first `mesh.begin` event is emitted.
+
+JSONL chunking limits individual response sizes but does not provide progressive geometry computation.
+
+Empty mesh responses contain zero vertices and indices.
+
+### Interactive and network integration
+
+The CLI communicates through standard input and output. Network transport, authentication, concurrent client coordination and application-level caching are responsibilities of the integrating application.
+
+Each CLI process handles requests sequentially.
+
+For interactive applications:
+
+* Keep the CLI process alive between requests.
+* Cache unchanged meshes on the application side.
+* Request tessellation only for affected transforms and dependent geometry.
+* Avoid tessellating the complete model after every modification.
+* Separate interactive transform manipulation from expensive geometry recomputation.
+* Allow long-running tessellation requests to complete outside the rendering loop.
+
+The CLI does not provide hard real-time execution guarantees.
 
 ## Complete example
 

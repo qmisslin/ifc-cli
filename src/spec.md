@@ -871,6 +871,23 @@ L’ouverture possède sa propre représentation et son propre placement.
 
 La représentation géométrique originale du transform cible n’est pas modifiée.
 
+Lors de la tessellation physique, les opérations booléennes sont
+évaluées sur les représentations BRep avant triangulation.
+
+Pour chaque produit concerné, le résultat physique correspond à
+l'union de la géométrie de base et des additions, à laquelle sont
+retirées toutes les soustractions.
+
+L'ordre de création des opérations ne modifie pas cette règle.
+
+Les projections et ouvertures natives du modèle IFC sont également
+prises en compte.
+
+Une soustraction complète doit produire un maillage vide valide.
+
+Les opérations booléennes ne modifient pas les représentations IFC
+persistantes et ne concernent jamais les domaines spatiaux.
+
 ### 8.5 Restrictions
 
 Une opération géométrique ne peut être créée que si le transform cible est compatible avec la relation IFC correspondante.
@@ -1495,6 +1512,20 @@ Au moins un champ modifiable doit être présent.
 
 Un objet vide ne constitue pas une mise à jour valide.
 
+Les paramètres susceptibles d'être rejetés par les validations métier
+doivent être vérifiés avant toute modification du modèle IFC.
+
+Cette prévalidation concerne notamment les placements, profils,
+opérations géométriques, types de propriétés, valeurs et unités.
+
+Une requête rejetée pendant cette phase ne doit modifier ni le graphe
+IFC ni les index de session existants.
+
+La prévalidation ne constitue pas un mécanisme transactionnel complet.
+
+L'atomicité absolue face aux erreurs internes survenant pendant une
+mutation IFC n'est pas garantie.
+
 ---
 
 ### 11.9 `GeometryKind`
@@ -1876,6 +1907,21 @@ Les objets `transforms` et `geometries` associent les identifiants
 des entités sources aux identifiants de leurs copies.
 
 Les entités sources restent valides et inchangées.
+
+Les property sets d'occurrence associés exclusivement à un transform
+sont dupliqués indépendamment, avec leurs propriétés simples et complexes.
+
+Les GlobalIds des nouvelles entités IfcRoot sont régénérés.
+
+Les relations de propriétés partagées, les définitions de type,
+les quantités et les références de matériaux conservent leur
+comportement de partage.
+
+La hiérarchie sélectionnée doit être validée avant toute création
+d'entité dupliquée.
+
+Un IfcProject ou un transform utilisant un placement non pris en
+charge ne peut pas être dupliqué.
 
 #### ROUTE API : `transformTessellate`
 
@@ -2571,6 +2617,7 @@ INVALID_PLACEMENT
 MATERIAL_NOT_EDITABLE
 TESSELLATION_FAILED
 INTERNAL_ERROR
+TRANSFORM_NOT_DUPLICABLE
 ```
 
 ### 13.1 `INVALID_JSON`
@@ -2671,6 +2718,20 @@ DELETE_NOT_ALLOWED
 Une entité référencée reste supprimable.
 
 Ses relations et références sont automatiquement nettoyées.
+
+### 13.20 `TRANSFORM_NOT_DUPLICABLE`
+
+Le transform demandé, ou un transform appartenant à la hiérarchie
+sélectionnée, ne peut pas être dupliqué.
+
+Cette erreur concerne notamment :
+
+* les transforms correspondant à un IfcProject ;
+* les transforms utilisant un placement autre que IfcLocalPlacement,
+  lorsqu'un placement est présent.
+
+Les détails de l'erreur identifient le transform incompatible et,
+lorsqu'elle est disponible, la classe IFC de son placement.
 
 ---
 
