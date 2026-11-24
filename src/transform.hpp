@@ -689,7 +689,8 @@ inline std::optional<std::string> globalIdOf(const Base* entity) {
 inline Base* createIfcValue(
     IfcParse::IfcFile& file,
     const std::string& valueType,
-    const json& value) {
+    const json& value,
+    bool validateOnly = false) {
 
     const IfcParse::declaration* declaration = nullptr;
 
@@ -815,6 +816,11 @@ inline Base* createIfcValue(
 
         default:
             rejectValue();
+    }
+
+    // Validation must not allocate or modify IFC instances.
+    if (validateOnly) {
+        return nullptr;
     }
 
     Base* typedValue = nullptr;

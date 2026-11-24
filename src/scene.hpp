@@ -152,205 +152,496 @@ public:
         return transform.toJson(*file_, transformWorldMatrix(transform), resolver());
     }
 
+private:
+    void validateMutationProperties(const json& properties) {
+        for (const auto& property : properties) {
+            createIfcValue(
+                *file_,
+                property.at("valueType").get<std::string>(),
+                property.at("value"),
+                true);
+
+            resolveUnit(
+                *file_,
+                property.at("unit"));
+        }
+    }
+
+public:
     json transformCreate(
         const std::string& name,
         const json& parents,
         const json& transformInput,
         const json& properties) {
-        requireLoaded();
-        const ParentSelection selection = resolveParents(parents, nullptr);
-        validateParentCompatibility(nullptr, selection);
-        Matrix4 requested = matrixFromJson(transformInput.at("matrix"));
-        validateRigidMatrix(requested);
-        const Matrix4 local = transformInput.at("space").get<std::string>() == "world" ?
-            multiplyMatrix(inverseRigidMatrix(parentWorldMatrix(selection.placement)), requested) : requested;
 
-        Base* product = createInstance(*file_, "IfcBuildingElementProxy");
+        requireLoaded();
+
+        const ParentSelection selection =
+            resolveParents(parents, nullptr);
+
+        validateParentCompatibility(nullptr, selection);
+
+        const Matrix4 requested =
+            matrixFromJson(transformInput.at("matrix"));
+
+        validateRigidMatrix(requested);
+
+        const Matrix4 local =
+            transformInput.at("space").get<std::string>() == "world"
+                ? multiplyMatrix(
+                    inverseRigidMatrix(
+                        parentWorldMatrix(selection.placement)),
+                    requested)
+                : requested;
+
+        validateRigidMatrix(local);
+
+        // Validate every property before creating IFC entities.
+        validateMutationProperties(properties);
+
+        Base* product = createInstance(
+            *file_,
+            "IfcBuildingElementProxy");
+
         initializeRoot(*file_, product, name);
+
         if (hasAttribute(product, "ObjectType")) {
             unsetAttribute(product, "ObjectType");
         }
-        setEntityAttribute(product, "ObjectPlacement", createLocalPlacement(
-            *file_,
-            selection.placement == nullptr ? nullptr : selection.placement->objectPlacement(),
-            local));
+
+        setEntityAttribute(
+            product,
+            "ObjectPlacement",
+            createLocalPlacement(
+                *file_,
+                selection.placement == nullptr
+                    ? nullptr
+                    : selection.placement->objectPlacement(),
+                local));
+
         if (hasAttribute(product, "Representation")) {
             unsetAttribute(product, "Representation");
         }
+
         if (hasAttribute(product, "Tag")) {
             unsetAttribute(product, "Tag");
         }
+
         if (hasAttribute(product, "PredefinedType")) {
             try {
-                setEnumeration(product, "PredefinedType", "NOTDEFINED");
+                setEnumeration(
+                    product,
+                    "PredefinedType",
+                    "NOTDEFINED");
             } catch (const std::exception&) {
                 unsetAttribute(product, "PredefinedType");
             }
         }
 
         Entity* productEntity = asEntity(product);
+
         if (productEntity == nullptr) {
-            throw SceneError("INTERNAL_ERROR", "Created IFC product is not an entity");
+            throw SceneError(
+                "INTERNAL_ERROR",
+                "Created IFC product is not an entity");
         }
-        const std::string id = nextId("transform", transformCounter_);
-        transforms_.emplace(id, std::make_unique<Transform>(id, productEntity));
+
+        const std::string id =
+            nextId("transform", transformCounter_);
+
+        transforms_.emplace(
+            id,
+            std::make_unique<Transform>(
+                id,
+                productEntity));
+
         transformByEntity_[product] = id;
 
         try {
-            replaceSpatialParent(product, selection.spatial == nullptr ? nullptr : selection.spatial->entity());
-            replaceDecompositionParent(product, selection.decomposition == nullptr ? nullptr : selection.decomposition->entity());
-            replaceOccurrenceProperties(*file_, product, properties);
+            replaceSpatialParent(
+                product,
+                selection.spatial == nullptr
+                    ? nullptr
+                    : selection.spatial->entity());
+
+            replaceDecompositionParent(
+                product,
+                selection.decomposition == nullptr
+                    ? nullptr
+                    : selection.decomposition->entity());
+
+            replaceOccurrenceProperties(
+                *file_,
+                product,
+                properties);
+
             refreshRelations();
+
             return transformGet(id);
+
         } catch (...) {
             transforms_.erase(id);
             transformByEntity_.erase(product);
+
             if (file_ != nullptr) {
                 try {
                     file_->removeEntity(product);
                 } catch (...) {
                 }
             }
+
             throw;
         }
     }
 
-    json transformDuplicate(const std::string& id, bool includeChildren) {
+    json transformDuplicate(
+        const std::string& id,
+        bool includeChildren) {
+
         requireLoaded();
         requireTransform(id);
 
         std::unordered_set<std::string> selectedIds{id};
+
         if (includeChildren) {
             collectTransformChildren(selectedIds);
         }
 
-        std::unordered_map<std::string, std::string> transformMapping;
-        std::unordered_map<std::string, std::string> geometryMapping;
-        std::unordered_map<const Base*, Base*> representationMapping;
-        std::vector<std::string> pending(selectedIds.begin(), selectedIds.end());
-        std::sort(pending.begin(), pending.end(), [&id](const std::string& lhs, const std::string& rhs) {
-            if (lhs == id || rhs == id) {
-                return lhs == id && rhs != id;
+        std::unordered_map<std::string, std::string>
+            transformMapping;
+
+        std::unordered_map<std::string, std::string>
+            geometryMapping;
+
+        std::unordered_map<const Base*, Base*>
+            representationMapping;
+
+        std::vector<std::string> pending(
+            selectedIds.begin(),
+            selectedIds.end());
+
+        std::sort(
+            pending.begin(),
+            pending.end(),
+            [&id](
+                const std::string& lhs,
+                const std::string& rhs) {
+
+                if (lhs == id || rhs == id) {
+                    return lhs == id && rhs != id;
+                }
+
+                const auto left = lhs.find(':');
+                const auto right = rhs.find(':');
+
+                return std::stoull(lhs.substr(left + 1)) <
+                    std::stoull(rhs.substr(right + 1));
+            });
+
+        // Validate the complete hierarchy before creating duplicates.
+        for (const std::string& sourceId : pending) {
+            Transform& source = requireTransform(sourceId);
+
+            if (isA(source.entity(), "IfcProject")) {
+                throw SceneError(
+                    "TRANSFORM_NOT_DUPLICABLE",
+                    "IfcProject transforms cannot be duplicated",
+                    json{{"id", source.id()}});
             }
-            const auto left = lhs.find(':');
-            const auto right = rhs.find(':');
-            return std::stoull(lhs.substr(left + 1)) < std::stoull(rhs.substr(right + 1));
-        });
+
+            Base* placement = source.objectPlacement();
+
+            if (placement != nullptr &&
+                !isA(placement, "IfcLocalPlacement")) {
+
+                throw SceneError(
+                    "TRANSFORM_NOT_DUPLICABLE",
+                    "Only transforms using IfcLocalPlacement can be duplicated",
+                    json{
+                        {"id", source.id()},
+                        {"sourceType", source.placementSourceType()}
+                    });
+            }
+
+            if (placement != nullptr) {
+                validateRigidMatrix(source.localMatrix());
+            }
+        }
+
+        // Build the duplication order without modifying the IFC graph.
+        std::vector<std::string> duplicationOrder;
+
+        std::unordered_map<std::string, std::string>
+            validatedParents;
+
+        while (!pending.empty()) {
+            bool progressed = false;
+
+            for (
+                auto iterator = pending.begin();
+                iterator != pending.end();
+            ) {
+                Transform& source =
+                    requireTransform(*iterator);
+
+                if (!internalParentsDuplicated(
+                    source,
+                    selectedIds,
+                    validatedParents)) {
+
+                    ++iterator;
+                    continue;
+                }
+
+                duplicationOrder.push_back(source.id());
+
+                validatedParents.emplace(
+                    source.id(),
+                    source.id());
+
+                iterator = pending.erase(iterator);
+
+                progressed = true;
+            }
+
+            if (!progressed) {
+                throw SceneError(
+                    "INVALID_RELATION",
+                    "Transform graph contains a parent cycle that cannot be duplicated",
+                    json{{"id", id}});
+            }
+        }
 
         std::optional<std::string> duplicatedRootId;
-        try {
-            while (!pending.empty()) {
-                bool progressed = false;
-                for (auto iterator = pending.begin(); iterator != pending.end();) {
-                    Transform& source = requireTransform(*iterator);
-                    if (!internalParentsDuplicated(source, selectedIds, transformMapping)) {
-                        ++iterator;
-                        continue;
-                    }
 
-                    const ParentSelection parents = duplicateParents(source, transformMapping);
-                    const bool root = source.id() == id;
-                    const std::string duplicateId = duplicateTransformEntity(
+        try {
+            for (const std::string& sourceId : duplicationOrder) {
+                Transform& source = requireTransform(sourceId);
+
+                const ParentSelection parents =
+                    duplicateParents(
+                        source,
+                        transformMapping);
+
+                const bool root = source.id() == id;
+
+                const std::string duplicateId =
+                    duplicateTransformEntity(
                         source,
                         parents,
                         root,
                         representationMapping);
-                    transformMapping[source.id()] = duplicateId;
-                    if (root) {
-                        duplicatedRootId = duplicateId;
-                    }
-                    iterator = pending.erase(iterator);
-                    progressed = true;
-                }
 
-                if (!progressed) {
-                    throw SceneError(
-                        "INVALID_RELATION",
-                        "Transform graph contains a parent cycle that cannot be duplicated",
-                        json{{"id", id}});
+                transformMapping[source.id()] =
+                    duplicateId;
+
+                if (root) {
+                    duplicatedRootId = duplicateId;
                 }
             }
 
-            cloneRepresentationStyles(representationMapping);
-            copyDuplicateRelations(transformMapping);
-            copyDuplicateTransformMaterials(transformMapping);
+            cloneRepresentationStyles(
+                representationMapping);
+
+            copyDuplicateRelations(
+                transformMapping);
+
+            copyDuplicateTransformMaterials(
+                transformMapping);
+
             indexGeometries();
-            mapDuplicateNativeGeometries(representationMapping, geometryMapping);
-            duplicateEditorGeometries(transformMapping, geometryMapping);
+
+            mapDuplicateNativeGeometries(
+                representationMapping,
+                geometryMapping);
+
+            duplicateEditorGeometries(
+                transformMapping,
+                geometryMapping);
+
             refreshRelations();
 
             json transformResult = json::object();
-            for (const auto& [sourceId, duplicateId] : transformMapping) {
+
+            for (
+                const auto& [sourceId, duplicateId] :
+                transformMapping
+            ) {
                 transformResult[sourceId] = duplicateId;
             }
+
             json geometryResult = json::object();
-            for (const auto& [sourceId, duplicateId] : geometryMapping) {
+
+            for (
+                const auto& [sourceId, duplicateId] :
+                geometryMapping
+            ) {
                 geometryResult[sourceId] = duplicateId;
             }
+
             return json{
                 {"rootId", *duplicatedRootId},
                 {"transforms", std::move(transformResult)},
-                {"geometries", std::move(geometryResult)}};
+                {"geometries", std::move(geometryResult)}
+            };
+
         } catch (...) {
-            if (duplicatedRootId.has_value() && transforms_.count(*duplicatedRootId) != 0) {
+            if (duplicatedRootId.has_value() &&
+                transforms_.count(*duplicatedRootId) != 0) {
+
                 try {
-                    std::unordered_set<std::string> visiting;
-                    deleteTransformRecursive(*duplicatedRootId, visiting);
                     refreshRelations();
+
+                    std::unordered_set<std::string> visiting;
+
+                    deleteTransformRecursive(
+                        *duplicatedRootId,
+                        visiting);
+
+                    refreshRelations();
+
                 } catch (...) {
                 }
             }
+
             throw;
         }
     }
 
-    json transformUpdate(const std::string& id, const json& changes) {
+    json transformUpdate(
+        const std::string& id,
+        const json& changes) {
+
         requireLoaded();
+
         Transform& target = requireTransform(id);
 
         ParentSelection selection{
-            target.spatialParentId().has_value() ? &requireTransform(*target.spatialParentId()) : nullptr,
-            target.placementParentId().has_value() ? &requireTransform(*target.placementParentId()) : nullptr,
-            target.decompositionParentId().has_value() ? &requireTransform(*target.decompositionParentId()) : nullptr};
+            target.spatialParentId().has_value()
+                ? &requireTransform(*target.spatialParentId())
+                : nullptr,
+
+            target.placementParentId().has_value()
+                ? &requireTransform(*target.placementParentId())
+                : nullptr,
+
+            target.decompositionParentId().has_value()
+                ? &requireTransform(*target.decompositionParentId())
+                : nullptr
+        };
+
+        // Validate all changes before modifying the transform.
         if (changes.contains("parents")) {
-            selection = resolveParents(changes.at("parents"), &target);
-            validateParentCompatibility(&target, selection);
+            selection = resolveParents(
+                changes.at("parents"),
+                &target);
+
+            validateParentCompatibility(
+                &target,
+                selection);
         }
 
-        const Matrix4 previousLocal = target.localMatrix();
+        std::optional<std::string> name;
+        std::optional<Matrix4> local;
+
         if (changes.contains("name")) {
-            target.setName(changes.at("name").get<std::string>());
-        }
-        if (changes.contains("parents")) {
-            replaceSpatialParent(target.entity(), selection.spatial == nullptr ? nullptr : selection.spatial->entity());
-            replaceDecompositionParent(target.entity(), selection.decomposition == nullptr ? nullptr : selection.decomposition->entity());
+            if (!hasAttribute(target.entity(), "Name")) {
+                throw SceneError(
+                    "TRANSFORM_NOT_EDITABLE",
+                    "Transform name is not editable",
+                    json{{"id", id}});
+            }
+
+            name = changes.at("name").get<std::string>();
         }
 
-        if (changes.contains("transform") || changes.contains("parents")) {
-            Matrix4 local = previousLocal;
+        if (changes.contains("transform") ||
+            changes.contains("parents")) {
+
+            if (!target.placementEditable()) {
+                throw SceneError(
+                    "TRANSFORM_NOT_EDITABLE",
+                    "Transform placement is not editable",
+                    json{{"id", id}});
+            }
+
+            local = target.localMatrix();
+
             if (changes.contains("transform")) {
                 const json& input = changes.at("transform");
-                const Matrix4 requested = matrixFromJson(input.at("matrix"));
+
+                const Matrix4 requested =
+                    matrixFromJson(input.at("matrix"));
+
                 validateRigidMatrix(requested);
-                local = input.at("space").get<std::string>() == "world" ?
-                    multiplyMatrix(inverseRigidMatrix(parentWorldMatrix(selection.placement)), requested) : requested;
+
+                local =
+                    input.at("space").get<std::string>() == "world"
+                        ? multiplyMatrix(
+                            inverseRigidMatrix(
+                                parentWorldMatrix(
+                                    selection.placement)),
+                            requested)
+                        : requested;
             }
-            Base* previousPlacement = target.replacePlacement(
-                *file_,
-                selection.placement == nullptr ? nullptr : selection.placement->objectPlacement(),
-                local);
+
+            validateRigidMatrix(*local);
+        }
+
+        if (changes.contains("properties")) {
+            validateMutationProperties(
+                changes.at("properties"));
+        }
+
+        // Apply the validated changes.
+
+        if (name.has_value()) {
+            target.setName(*name);
+        }
+
+        if (changes.contains("parents")) {
+            replaceSpatialParent(
+                target.entity(),
+                selection.spatial == nullptr
+                    ? nullptr
+                    : selection.spatial->entity());
+
+            replaceDecompositionParent(
+                target.entity(),
+                selection.decomposition == nullptr
+                    ? nullptr
+                    : selection.decomposition->entity());
+        }
+
+        if (local.has_value()) {
+            Base* previousPlacement =
+                target.replacePlacement(
+                    *file_,
+                    selection.placement == nullptr
+                        ? nullptr
+                        : selection.placement->objectPlacement(),
+                    *local);
+
             if (previousPlacement != nullptr) {
-                for (const std::string& geometryId : target.geometryIds()) {
-                    Geometry& geometry = requireGeometry(geometryId);
+                for (
+                    const std::string& geometryId :
+                    target.geometryIds()
+                ) {
+                    Geometry& geometry =
+                        requireGeometry(geometryId);
+
                     if (!geometry.isEditorGeometry()) {
                         continue;
                     }
 
-                    Base* placement = geometry.objectPlacement();
+                    Base* placement =
+                        geometry.objectPlacement();
 
                     if (isA(placement, "IfcLocalPlacement") &&
-                        getEntityAttribute(placement, "PlacementRelTo") ==
-                            previousPlacement) {
+                        getEntityAttribute(
+                            placement,
+                            "PlacementRelTo") == previousPlacement) {
+
                         setEntityAttribute(
                             placement,
                             "PlacementRelTo",
@@ -358,17 +649,24 @@ public:
                     }
                 }
 
-                for (const auto& [childId, child] : transforms_) {
+                for (
+                    const auto& [childId, child] :
+                    transforms_
+                ) {
                     if (childId == id ||
-                        child->placementParentId() != std::optional<std::string>(id)) {
+                        child->placementParentId() !=
+                            std::optional<std::string>(id)) {
                         continue;
                     }
 
-                    Base* placement = child->objectPlacement();
+                    Base* placement =
+                        child->objectPlacement();
 
                     if (isA(placement, "IfcLocalPlacement") &&
-                        getEntityAttribute(placement, "PlacementRelTo") ==
-                            previousPlacement) {
+                        getEntityAttribute(
+                            placement,
+                            "PlacementRelTo") == previousPlacement) {
+
                         setEntityAttribute(
                             placement,
                             "PlacementRelTo",
@@ -377,12 +675,18 @@ public:
                 }
             }
 
-            removePlacementIfUnreferenced(previousPlacement);
+            removePlacementIfUnreferenced(
+                previousPlacement);
         }
+
         if (changes.contains("properties")) {
-            target.replaceProperties(*file_, changes.at("properties"));
+            target.replaceProperties(
+                *file_,
+                changes.at("properties"));
         }
+
         refreshRelations();
+
         return transformGet(id);
     }
 
@@ -1433,37 +1737,118 @@ public:
         const std::string& category,
         const json& visualInput,
         const json& properties) {
+
         requireLoaded();
-        const Visual visual = visualFromJson(visualInput);
+
+        const Visual visual =
+            visualFromJson(visualInput);
+
         validateVisual(visual);
-        const std::string id = nextId("material", materialCounter_);
-        std::unique_ptr<Material> material = Material::create(*file_, id, name, category, visual, properties);
+
+        // Validate user properties before allocating material entities.
+        validateMutationProperties(properties);
+
+        // Ensure a representation context is available before creation.
+        findMaterialRepresentationContext(*file_);
+
+        const std::string id =
+            nextId("material", materialCounter_);
+
+        std::unique_ptr<Material> material =
+            Material::create(
+                *file_,
+                id,
+                name,
+                category,
+                visual,
+                properties);
+
         Base* entity = material->entity();
-        materials_.emplace(id, std::move(material));
+
+        materials_.emplace(
+            id,
+            std::move(material));
+
         materialByEntity_[entity] = id;
+
         refreshRelations();
+
         return materialGet(id);
     }
 
-    json materialUpdate(const std::string& id, const json& changes) {
+    json materialUpdate(
+        const std::string& id,
+        const json& changes) {
+
         requireLoaded();
+
         Material& material = requireMaterial(id);
+
         if (!material.editable()) {
-            throw SceneError("MATERIAL_NOT_EDITABLE", "Material is not editable", json{{"id", id}});
+            throw SceneError(
+                "MATERIAL_NOT_EDITABLE",
+                "Material is not editable",
+                json{{"id", id}});
         }
+
+        std::optional<std::string> name;
+        std::optional<std::string> category;
+        std::optional<Visual> visual;
+
+        // Validate all requested changes before modifying the material.
+
         if (changes.contains("name")) {
-            material.setName(*file_, changes.at("name").get<std::string>());
+            name = changes.at("name").get<std::string>();
         }
+
         if (changes.contains("category")) {
-            material.setCategory(*file_, changes.at("category").get<std::string>());
+            category = changes.at("category").get<std::string>();
         }
+
         if (changes.contains("visual")) {
-            material.setVisual(*file_, visualFromJson(changes.at("visual")));
+            visual = visualFromJson(
+                changes.at("visual"));
+
+            validateVisual(*visual);
+
+            if (material.surfaceStyle(*file_) == nullptr) {
+                findMaterialRepresentationContext(*file_);
+            }
         }
+
         if (changes.contains("properties")) {
-            material.replaceProperties(*file_, changes.at("properties"));
+            validateMutationProperties(
+                changes.at("properties"));
         }
+
+        // Apply the validated changes.
+
+        if (name.has_value()) {
+            material.setName(
+                *file_,
+                *name);
+        }
+
+        if (category.has_value()) {
+            material.setCategory(
+                *file_,
+                *category);
+        }
+
+        if (visual.has_value()) {
+            material.setVisual(
+                *file_,
+                *visual);
+        }
+
+        if (changes.contains("properties")) {
+            material.replaceProperties(
+                *file_,
+                changes.at("properties"));
+        }
+
         refreshRelations();
+
         return materialGet(id);
     }
 
