@@ -10,6 +10,17 @@
 #include <ifcparse/IfcFile.h>
 #include <ifcparse/IfcSchema.h>
 
+#include <BRepAlgoAPI_BooleanOperation.hxx>
+#include <BRepAlgoAPI_Fuse.hxx>
+#include <BRepAlgoAPI_Cut.hxx>
+#include <BRepTools.hxx>
+#include <Standard_Failure.hxx>
+#include <TopExp_Explorer.hxx>
+#include <TopTools_ListOfShape.hxx>
+#include <TopoDS_Shape.hxx>
+
+#include <map>
+
 #include <algorithm>
 #include <cstddef>
 #include <filesystem>
@@ -376,20 +387,37 @@ public:
         return json{{"id", id}};
     }
 
-    void transformTessellate(const std::string& id, const json& options, const MeshEmitter& emit) {
+        void transformTessellate(
+        const std::string& id,
+        const json& options,
+        const MeshEmitter& emit) {
         requireLoaded();
+
         Transform& root = requireTransform(id);
-        const bool includeChildren = options.at("includeChildren").get<bool>();
-        const bool includeNormals = options.at("includeNormals").get<bool>();
-        const bool includeMaterials = options.at("includeMaterials").get<bool>();
-        const bool worldSpace = options.at("space").get<std::string>() == "world";
-        const std::string kind = options.value("kind", std::string("SOLID"));
+
+        const bool includeChildren =
+            options.at("includeChildren").get<bool>();
+
+        const bool includeNormals =
+            options.at("includeNormals").get<bool>();
+
+        const bool includeMaterials =
+            options.at("includeMaterials").get<bool>();
+
+        const bool worldSpace =
+            options.at("space").get<std::string>() == "world";
+
+        const std::string kind =
+            options.value("kind", std::string("SOLID"));
+
         const bool domainMode = kind == "DOMAIN";
 
         std::unordered_set<std::string> selectedIds{id};
+
         if (includeChildren) {
             collectTransformChildren(selectedIds);
         }
+
         std::unordered_set<unsigned> productIds;
         std::unordered_set<unsigned> expectedDomains;
 
@@ -429,104 +457,678 @@ public:
             }
         }
 
-        if (productIds.empty()) {
+        std::vector<double> vertices;
+        std::vector<int> indices;
+        std::vector<double> normals;
+        std::vector<json> groups;
+
+        const auto emitResult = [&]() {
             emit(json{
                 {"event", "mesh.begin"},
-                {"vertexCount", 0},
-                {"indexCount", 0}});
+                {"vertexCount", vertices.size() / 3},
+                {"indexCount", indices.size()}
+            });
+
+            emitChunks("mesh.vertices", vertices, emit);
+            emitChunks("mesh.indices", indices, emit);
+
+            if (includeNormals) {
+                emitChunks("mesh.normals", normals, emit);
+            }
 
             if (includeMaterials) {
                 emit(json{
                     {"event", "mesh.materials"},
-                    {"groups", json::array()}});
+                    {"groups", groups}
+                });
             }
 
             emit(json{{"event", "mesh.end"}});
+        };
+
+        if (productIds.empty()) {
+            emitResult();
             return;
         }
 
         try {
-            ifcopenshell::geometry::Settings settings;
+            using Settings = ifcopenshell::geometry::Settings;
+            using Triangulation = IfcGeom::Representation::Triangulation;
+
+            struct BooleanOperations {
+                std::set<unsigned> additions;
+                std::set<unsigned> subtractions;
+
+                bool empty() const {
+                    return additions.empty() && subtractions.empty();
+                }
+            };
+
+            Settings settings;
+
             settings.set("use-world-coords", true);
             settings.set("weld-vertices", false);
             settings.set("apply-default-materials", true);
-            auto kernel = std::make_unique<IfcGeom::OpenCascadeKernel>(settings);
-            IfcGeom::Iterator iterator(std::move(kernel), settings, file_.get());
 
-            iterator.filters().push_back([&productIds](Entity* product) {
-                return product != nullptr &&
-                    productIds.count(product->id()) != 0;
-            });
-
-            std::vector<double> vertices;
-            std::vector<int> indices;
-            std::vector<double> normals;
-            std::vector<json> groups;
-            Matrix4 outputTransform = worldSpace
+            const Matrix4 baseOutputTransform = worldSpace
                 ? identityMatrix()
                 : inverseRigidMatrix(transformWorldMatrix(root));
 
-            if (iterator.initialize()) {
-                if (!worldSpace) {
-                    const double unitScale = iterator.unit_magnitude();
+            const auto outputTransformForUnit = [&](double unitScale) {
+                Matrix4 result = baseOutputTransform;
 
-                    outputTransform[3] *= unitScale;
-                    outputTransform[7] *= unitScale;
-                    outputTransform[11] *= unitScale;
+                if (!worldSpace) {
+                    result[3] *= unitScale;
+                    result[7] *= unitScale;
+                    result[11] *= unitScale;
                 }
 
-                do {
-                    const auto* element = dynamic_cast<const IfcGeom::TriangulationElement*>(iterator.get());
-                    if (element == nullptr || element->product() == nullptr || productIds.count(element->product()->id()) == 0) {
-                        continue;
-                    }
-                    const auto& triangulation = element->geometry();
+                return result;
+            };
 
-                    if (!triangulation.faces().empty()) {
-                        expectedDomains.erase(element->product()->id());
-                    }
+            const auto appendMesh = [&](
+                const Triangulation& triangulation,
+                const Base* product,
+                const Matrix4& outputTransform) {
 
-                    const std::size_t vertexOffset = vertices.size() / 3;
-                    const std::size_t indexOffset = indices.size();
-                    const auto& elementVertices = triangulation.verts();
-                    for (std::size_t offset = 0; offset + 2 < elementVertices.size(); offset += 3) {
-                        const auto point = transformPoint(outputTransform, {
+                if (triangulation.faces().empty()) {
+                    return;
+                }
+
+                const std::size_t vertexOffset = vertices.size() / 3;
+                const std::size_t indexOffset = indices.size();
+
+                const auto& elementVertices = triangulation.verts();
+
+                for (
+                    std::size_t offset = 0;
+                    offset + 2 < elementVertices.size();
+                    offset += 3
+                ) {
+                    const auto point = transformPoint(
+                        outputTransform,
+                        {
                             elementVertices[offset],
                             elementVertices[offset + 1],
-                            elementVertices[offset + 2]});
-                        vertices.insert(vertices.end(), point.begin(), point.end());
+                            elementVertices[offset + 2]
+                        });
+
+                    vertices.insert(
+                        vertices.end(),
+                        point.begin(),
+                        point.end());
+                }
+
+                for (int value : triangulation.faces()) {
+                    indices.push_back(
+                        static_cast<int>(vertexOffset) + value);
+                }
+
+                if (includeNormals) {
+                    const auto& elementNormals =
+                        triangulation.normals();
+
+                    for (
+                        std::size_t offset = 0;
+                        offset + 2 < elementNormals.size();
+                        offset += 3
+                    ) {
+                        const auto direction = normalize3(
+                            transformDirection(
+                                outputTransform,
+                                {
+                                    elementNormals[offset],
+                                    elementNormals[offset + 1],
+                                    elementNormals[offset + 2]
+                                }));
+
+                        normals.insert(
+                            normals.end(),
+                            direction.begin(),
+                            direction.end());
                     }
-                    for (int value : triangulation.faces()) {
-                        indices.push_back(static_cast<int>(vertexOffset) + value);
-                    }
-                    if (includeNormals) {
-                        const auto& elementNormals = triangulation.normals();
-                        for (std::size_t offset = 0; offset + 2 < elementNormals.size(); offset += 3) {
-                            const auto direction = normalize3(transformDirection(outputTransform, {
-                                elementNormals[offset],
-                                elementNormals[offset + 1],
-                                elementNormals[offset + 2]}));
-                            normals.insert(normals.end(), direction.begin(), direction.end());
+                }
+
+                if (includeMaterials &&
+                    !domainMode &&
+                    product != nullptr &&
+                    indices.size() > indexOffset) {
+
+                    const auto transformIterator =
+                        transformByEntity_.find(product);
+
+                    if (transformIterator != transformByEntity_.end()) {
+                        const auto& materialIds =
+                            requireTransform(
+                                transformIterator->second
+                            ).materialIds();
+
+                        if (!materialIds.empty()) {
+                            groups.push_back(json{
+                                {"materialId", materialIds.front()},
+                                {"indexOffset", indexOffset},
+                                {"indexCount", indices.size() - indexOffset}
+                            });
                         }
                     }
-                    if (includeMaterials &&
-                        !domainMode &&
-                        indices.size() > indexOffset) {
-                        const auto transformIterator = transformByEntity_.find(element->product());
-                        if (transformIterator != transformByEntity_.end()) {
-                            const auto& materialIds = requireTransform(transformIterator->second).materialIds();
-                            if (!materialIds.empty()) {
-                                groups.push_back(json{
-                                    {"materialId", materialIds.front()},
-                                    {"indexOffset", indexOffset},
-                                    {"indexCount", indices.size() - indexOffset}});
+                }
+            };
+
+            std::map<unsigned, BooleanOperations> directOperations;
+            std::map<unsigned, BooleanOperations> booleanProducts;
+
+            std::map<unsigned, Base*> productEntities;
+
+            std::unordered_set<unsigned> regularProducts = productIds;
+            std::unordered_set<unsigned> booleanInputProducts;
+
+            if (!domainMode) {
+                // Collect native and editor-created additive features.
+                for (
+                    Base* relation :
+                    instancesByType(*file_, "IfcRelProjectsElement")
+                ) {
+                    Base* parent = getEntityAttribute(
+                        relation,
+                        "RelatingElement");
+
+                    Base* feature = getEntityAttribute(
+                        relation,
+                        "RelatedFeatureElement");
+
+                    if (parent == nullptr || feature == nullptr) {
+                        continue;
+                    }
+
+                    if (getEntityAttribute(feature, "Representation") == nullptr) {
+                        continue;
+                    }
+
+                    directOperations[parent->id()].additions.insert(
+                        feature->id());
+                }
+
+                // Collect native and editor-created subtractive features.
+                for (
+                    Base* relation :
+                    instancesByType(*file_, "IfcRelVoidsElement")
+                ) {
+                    Base* parent = getEntityAttribute(
+                        relation,
+                        "RelatingBuildingElement");
+
+                    Base* feature = getEntityAttribute(
+                        relation,
+                        "RelatedOpeningElement");
+
+                    if (parent == nullptr || feature == nullptr) {
+                        continue;
+                    }
+
+                    if (getEntityAttribute(feature, "Representation") == nullptr) {
+                        continue;
+                    }
+
+                    directOperations[parent->id()].subtractions.insert(
+                        feature->id());
+                }
+
+                // Preserve opening inheritance through IFC aggregation.
+                std::map<unsigned, std::vector<Base*>> decompositions;
+
+                for (
+                    Base* relation :
+                    instancesByType(*file_, "IfcRelDecomposes")
+                ) {
+                    for (
+                        Base* child :
+                        aggregateToVector(
+                            getEntityAggregate(
+                                relation,
+                                "RelatedObjects"))
+                    ) {
+                        if (child != nullptr) {
+                            decompositions[child->id()].push_back(
+                                relation);
+                        }
+                    }
+                }
+
+                for (const std::string& selectedId : selectedIds) {
+                    Transform& transform = requireTransform(selectedId);
+
+                    Base* entity = transform.entity();
+                    const unsigned productId = entity->id();
+
+                    if (productIds.count(productId) == 0) {
+                        continue;
+                    }
+
+                    BooleanOperations operations;
+
+                    const auto direct = directOperations.find(productId);
+
+                    if (direct != directOperations.end()) {
+                        operations = direct->second;
+                    }
+
+                    // Match IfcOpenShell's aggregation-based opening
+                    // inheritance without applying openings twice.
+                    std::unordered_set<unsigned> visited{productId};
+
+                    Base* current = entity;
+
+                    while (current != nullptr) {
+                        const auto decomposition =
+                            decompositions.find(current->id());
+
+                        if (decomposition == decompositions.end() ||
+                            decomposition->second.size() != 1) {
+                            break;
+                        }
+
+                        Base* relation =
+                            decomposition->second.front();
+
+                        if (!isA(relation, "IfcRelAggregates")) {
+                            break;
+                        }
+
+                        Base* parent = getEntityAttribute(
+                            relation,
+                            "RelatingObject");
+
+                        if (parent == nullptr ||
+                            !visited.insert(parent->id()).second) {
+                            break;
+                        }
+
+                        if (isA(parent, "IfcElement") &&
+                            !isA(parent, "IfcFeatureElementSubtraction")) {
+
+                            const auto inherited =
+                                directOperations.find(parent->id());
+
+                            if (inherited != directOperations.end()) {
+                                operations.subtractions.insert(
+                                    inherited->second.subtractions.begin(),
+                                    inherited->second.subtractions.end());
                             }
                         }
+
+                        current = parent;
                     }
-                } while (iterator.next());
+
+                    if (operations.empty()) {
+                        continue;
+                    }
+
+                    booleanProducts.emplace(
+                        productId,
+                        operations);
+
+                    productEntities.emplace(
+                        productId,
+                        entity);
+
+                    regularProducts.erase(productId);
+
+                    booleanInputProducts.insert(productId);
+
+                    booleanInputProducts.insert(
+                        operations.additions.begin(),
+                        operations.additions.end());
+
+                    booleanInputProducts.insert(
+                        operations.subtractions.begin(),
+                        operations.subtractions.end());
+                }
             }
-            if (iterator.had_error_processing_elements()) {
-                throw SceneError("TESSELLATION_FAILED", "IfcOpenShell reported geometry processing errors");
+
+            // Preserve the existing tessellation pipeline for domains
+            // and products without external boolean operations.
+            if (!regularProducts.empty()) {
+                auto kernel =
+                    std::make_unique<IfcGeom::OpenCascadeKernel>(
+                        settings);
+
+                IfcGeom::Iterator iterator(
+                    std::move(kernel),
+                    settings,
+                    file_.get());
+
+                iterator.filters().push_back(
+                    [&regularProducts](Entity* product) {
+                        return product != nullptr &&
+                            regularProducts.count(product->id()) != 0;
+                    });
+
+                if (iterator.initialize()) {
+                    const Matrix4 outputTransform =
+                        outputTransformForUnit(
+                            iterator.unit_magnitude());
+
+                    do {
+                        const auto* element =
+                            dynamic_cast<const IfcGeom::TriangulationElement*>(
+                                iterator.get());
+
+                        if (element == nullptr ||
+                            element->product() == nullptr ||
+                            regularProducts.count(
+                                element->product()->id()) == 0) {
+                            continue;
+                        }
+
+                        const auto& triangulation =
+                            element->geometry();
+
+                        if (!triangulation.faces().empty()) {
+                            expectedDomains.erase(
+                                element->product()->id());
+                        }
+
+                        appendMesh(
+                            triangulation,
+                            element->product(),
+                            outputTransform);
+
+                    } while (iterator.next());
+                }
+
+                if (iterator.had_error_processing_elements()) {
+                    throw SceneError(
+                        "TESSELLATION_FAILED",
+                        "IfcOpenShell reported geometry processing errors");
+                }
+            }
+
+            if (!booleanProducts.empty()) {
+                // Retrieve exact BRep geometry before triangulation.
+                // Opening subtraction is disabled because all boolean
+                // operations are explicitly applied below.
+                Settings nativeSettings = settings;
+
+                nativeSettings.set(
+                    "disable-opening-subtractions",
+                    true);
+
+                nativeSettings.set(
+                    "convert-back-units",
+                    false);
+
+                nativeSettings.get<
+                    ifcopenshell::geometry::settings::IteratorOutput
+                >().value = ifcopenshell::geometry::settings::NATIVE;
+
+                std::map<unsigned, std::vector<TopoDS_Shape>> shapes;
+
+                auto kernel =
+                    std::make_unique<IfcGeom::OpenCascadeKernel>(
+                        nativeSettings);
+
+                IfcGeom::Iterator iterator(
+                    std::move(kernel),
+                    nativeSettings,
+                    file_.get());
+
+                iterator.filters().push_back(
+                    [&booleanInputProducts](Entity* product) {
+                        return product != nullptr &&
+                            booleanInputProducts.count(
+                                product->id()) != 0;
+                    });
+
+                if (iterator.initialize()) {
+                    do {
+                        const auto* element =
+                            dynamic_cast<const IfcGeom::BRepElement*>(
+                                iterator.get());
+
+                        if (element == nullptr ||
+                            element->product() == nullptr ||
+                            booleanInputProducts.count(
+                                element->product()->id()) == 0) {
+                            continue;
+                        }
+
+                        const unsigned productId =
+                            element->product()->id();
+
+                        for (const auto& item : element->geometry()) {
+                            // Apply the representation placement.
+                            // IfcOpenShell already converted coordinates
+                            // to metres and applied world placement.
+                            std::unique_ptr<IfcGeom::ConversionResultShape>
+                                transformed(item.apply_transform());
+
+                            const auto* shape =
+                                dynamic_cast<
+                                    const ifcopenshell::geometry::OpenCascadeShape*
+                                >(transformed.get());
+
+                            if (shape == nullptr) {
+                                throw SceneError(
+                                    "TESSELLATION_FAILED",
+                                    "Expected OpenCASCADE BRep geometry",
+                                    json{{"ifcEntityId", productId}});
+                            }
+
+                            if (!shape->shape().IsNull()) {
+                                shapes[productId].push_back(
+                                    shape->shape());
+                            }
+                        }
+
+                    } while (iterator.next());
+                }
+
+                if (iterator.had_error_processing_elements()) {
+                    throw SceneError(
+                        "TESSELLATION_FAILED",
+                        "IfcOpenShell reported BRep conversion errors");
+                }
+
+                const Matrix4 outputTransform =
+                    outputTransformForUnit(
+                        iterator.unit_magnitude());
+
+                const auto hasFaces = [](const TopoDS_Shape& shape) {
+                    if (shape.IsNull()) {
+                        return false;
+                    }
+
+                    TopExp_Explorer explorer(
+                        shape,
+                        TopAbs_FACE);
+
+                    return explorer.More();
+                };
+
+                const auto performBoolean = [&](
+                    BRepAlgoAPI_BooleanOperation& algorithm,
+                    const TopoDS_Shape& first,
+                    const TopoDS_Shape& second,
+                    const std::string& operation,
+                    unsigned productId) {
+
+                    TopTools_ListOfShape arguments;
+                    TopTools_ListOfShape tools;
+
+                    arguments.Append(first);
+                    tools.Append(second);
+
+                    algorithm.SetArguments(arguments);
+                    algorithm.SetTools(tools);
+
+                    // Keep the original BRep inputs unchanged.
+                    algorithm.SetNonDestructive(true);
+
+                    // Keep processing deterministic.
+                    algorithm.SetRunParallel(false);
+
+                    algorithm.Build();
+
+                    if (!algorithm.IsDone() || algorithm.HasErrors()) {
+                        throw SceneError(
+                            "TESSELLATION_FAILED",
+                            "OpenCASCADE boolean operation failed",
+                            json{
+                                {"operation", operation},
+                                {"ifcEntityId", productId}
+                            });
+                    }
+
+                    return algorithm.Shape();
+                };
+
+                const auto fuse = [&](
+                    const TopoDS_Shape& first,
+                    const TopoDS_Shape& second,
+                    unsigned productId) {
+
+                    if (!hasFaces(first)) {
+                        return second;
+                    }
+
+                    if (!hasFaces(second)) {
+                        return first;
+                    }
+
+                    BRepAlgoAPI_Fuse algorithm;
+
+                    return performBoolean(
+                        algorithm,
+                        first,
+                        second,
+                        "ADD",
+                        productId);
+                };
+
+                const auto subtract = [&](
+                    const TopoDS_Shape& first,
+                    const TopoDS_Shape& second,
+                    unsigned productId) {
+
+                    if (!hasFaces(first) || !hasFaces(second)) {
+                        return first;
+                    }
+
+                    BRepAlgoAPI_Cut algorithm;
+
+                    return performBoolean(
+                        algorithm,
+                        first,
+                        second,
+                        "SUBTRACT",
+                        productId);
+                };
+
+                const auto featureShapes = [&](
+                    unsigned featureId
+                ) -> const std::vector<TopoDS_Shape>& {
+
+                    const auto found = shapes.find(featureId);
+
+                    if (found == shapes.end() || found->second.empty()) {
+                        throw SceneError(
+                            "TESSELLATION_FAILED",
+                            "Boolean feature could not be converted to BRep",
+                            json{{"ifcEntityId", featureId}});
+                    }
+
+                    return found->second;
+                };
+
+                for (
+                    const auto& [productId, operations] :
+                    booleanProducts
+                ) {
+                    TopoDS_Shape physical;
+
+                    const auto baseShapes = shapes.find(productId);
+
+                    if (baseShapes != shapes.end()) {
+                        // Merge the base representation items into a
+                        // single physical result.
+                        for (const TopoDS_Shape& shape : baseShapes->second) {
+                            physical = fuse(
+                                physical,
+                                shape,
+                                productId);
+                        }
+                    } else {
+                        Base* product = productEntities.at(productId);
+
+                        // A transform without native geometry can still
+                        // receive additive features.
+                        if (getEntityAttribute(
+                            product,
+                            "Representation") != nullptr) {
+                            throw SceneError(
+                                "TESSELLATION_FAILED",
+                                "Base representation could not be converted to BRep",
+                                json{{"ifcEntityId", productId}});
+                        }
+                    }
+
+                    // Compute the union of all additive material.
+                    for (unsigned featureId : operations.additions) {
+                        for (
+                            const TopoDS_Shape& shape :
+                            featureShapes(featureId)
+                        ) {
+                            physical = fuse(
+                                physical,
+                                shape,
+                                productId);
+                        }
+                    }
+
+                    // Apply all subtractive operations to the complete
+                    // additive result, including projected material.
+                    for (unsigned featureId : operations.subtractions) {
+                        const auto& tools = featureShapes(featureId);
+
+                        for (const TopoDS_Shape& shape : tools) {
+                            physical = subtract(
+                                physical,
+                                shape,
+                                productId);
+                        }
+                    }
+
+                    // Complete subtraction is a valid empty result.
+                    if (!hasFaces(physical)) {
+                        continue;
+                    }
+
+                    // Discard stale triangulations before meshing the
+                    // resulting boolean topology.
+                    BRepTools::Clean(physical);
+
+                    ifcopenshell::geometry::OpenCascadeShape
+                        resultShape(physical);
+
+                    const IfcGeom::ConversionResultShape&
+                        conversionShape = resultShape;
+
+                    std::unique_ptr<Triangulation> triangulation(
+                        conversionShape.Triangulate(settings));
+
+                    if (triangulation == nullptr ||
+                        triangulation->faces().empty()) {
+                        throw SceneError(
+                            "TESSELLATION_FAILED",
+                            "Boolean result could not be triangulated",
+                            json{{"ifcEntityId", productId}});
+                    }
+
+                    appendMesh(
+                        *triangulation,
+                        productEntities.at(productId),
+                        outputTransform);
+                }
             }
 
             if (!expectedDomains.empty()) {
@@ -535,20 +1137,32 @@ public:
                     "One or more domains could not be tessellated");
             }
 
-            emit(json{{"event", "mesh.begin"}, {"vertexCount", vertices.size() / 3}, {"indexCount", indices.size()}});
-            emitChunks("mesh.vertices", vertices, emit);
-            emitChunks("mesh.indices", indices, emit);
-            if (includeNormals) {
-                emitChunks("mesh.normals", normals, emit);
-            }
-            if (includeMaterials) {
-                emit(json{{"event", "mesh.materials"}, {"groups", groups}});
-            }
-            emit(json{{"event", "mesh.end"}});
+            emitResult();
+
         } catch (const SceneError&) {
             throw;
+
+        } catch (const Standard_Failure& exception) {
+            const char* message = exception.GetMessageString();
+
+            throw SceneError(
+                "TESSELLATION_FAILED",
+                "OpenCASCADE could not tessellate the transform",
+                json{
+                    {"id", id},
+                    {"reason", message == nullptr
+                        ? "Unknown OpenCASCADE error"
+                        : message}
+                });
+
         } catch (const std::exception& exception) {
-            throw SceneError("TESSELLATION_FAILED", "IfcOpenShell could not tessellate the transform", json{{"id", id}, {"reason", exception.what()}});
+            throw SceneError(
+                "TESSELLATION_FAILED",
+                "IfcOpenShell could not tessellate the transform",
+                json{
+                    {"id", id},
+                    {"reason", exception.what()}
+                });
         }
     }
 

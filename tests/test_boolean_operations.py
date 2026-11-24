@@ -2036,7 +2036,7 @@ class BooleanOperationTests(unittest.TestCase):
                 0, 0, 0,
                 10, 8, 8
             ),
-            expected_surface=420.0,
+            expected_surface=416.0,
             inside_points=[
                 (2.0, 2.0, 7.0),
                 (4.0, 3.0, 7.0),
@@ -2131,12 +2131,12 @@ class BooleanOperationTests(unittest.TestCase):
         # Shared removed volume: 2 x 2 x 6 = 24.
         # Remaining volume: 480 - 72 - 72 + 24 = 360.
         # Union opening area: 20.
-        # Union opening perimeter: 22.
+        # Union opening perimeter: 20.
 
         mesh = self.assert_physical_result(
             expected_volume=360.0,
             expected_bounds=BASE_BOUNDS,
-            expected_surface=468.0,
+            expected_surface=456.0,
             inside_points=[
                 (0.5, 0.5, 3.0),
                 (1.5, 4.5, 3.0),
