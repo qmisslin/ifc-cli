@@ -44,7 +44,8 @@ public:
             {"ifcOpenShellVersion", ifcOpenShellVersion()},
             {"supportedSchemas", schemas},
             {"supportedProfiles", json::array({"polygon"})},
-            {"supportedGeometryOperations", json::array({"ADD", "SUBTRACT"})}};
+            {"supportedGeometryOperations", json::array({"ADD", "SUBTRACT"})},
+            {"supportedGeometryKinds", json::array({"SOLID", "DOMAIN"})}};
     }
 
     json load(const std::string& path) {
@@ -319,6 +320,44 @@ public:
                 *file_,
                 selection.placement == nullptr ? nullptr : selection.placement->objectPlacement(),
                 local);
+            if (previousPlacement != nullptr) {
+                for (const std::string& geometryId : target.geometryIds()) {
+                    Geometry& geometry = requireGeometry(geometryId);
+                    if (!geometry.isEditorGeometry()) {
+                        continue;
+                    }
+
+                    Base* placement = geometry.objectPlacement();
+
+                    if (isA(placement, "IfcLocalPlacement") &&
+                        getEntityAttribute(placement, "PlacementRelTo") ==
+                            previousPlacement) {
+                        setEntityAttribute(
+                            placement,
+                            "PlacementRelTo",
+                            target.objectPlacement());
+                    }
+                }
+
+                for (const auto& [childId, child] : transforms_) {
+                    if (childId == id ||
+                        child->placementParentId() != std::optional<std::string>(id)) {
+                        continue;
+                    }
+
+                    Base* placement = child->objectPlacement();
+
+                    if (isA(placement, "IfcLocalPlacement") &&
+                        getEntityAttribute(placement, "PlacementRelTo") ==
+                            previousPlacement) {
+                        setEntityAttribute(
+                            placement,
+                            "PlacementRelTo",
+                            target.objectPlacement());
+                    }
+                }
+            }
+
             removePlacementIfUnreferenced(previousPlacement);
         }
         if (changes.contains("properties")) {
@@ -344,14 +383,66 @@ public:
         const bool includeNormals = options.at("includeNormals").get<bool>();
         const bool includeMaterials = options.at("includeMaterials").get<bool>();
         const bool worldSpace = options.at("space").get<std::string>() == "world";
+        const std::string kind = options.value("kind", std::string("SOLID"));
+        const bool domainMode = kind == "DOMAIN";
 
         std::unordered_set<std::string> selectedIds{id};
         if (includeChildren) {
             collectTransformChildren(selectedIds);
         }
         std::unordered_set<unsigned> productIds;
-        for (const std::string& selectedId : selectedIds) {
-            productIds.insert(requireTransform(selectedId).entity()->id());
+        std::unordered_set<unsigned> expectedDomains;
+
+        if (options.contains("geometryId")) {
+            Geometry& geometry = requireGeometry(
+                options.at("geometryId").get<std::string>());
+
+            if (!domainMode ||
+                !geometry.isEditorGeometry() ||
+                !geometry.isDomain() ||
+                selectedIds.count(geometry.parentId()) == 0) {
+                throw SceneError(
+                    "INVALID_PARAMETERS",
+                    "geometryId must reference a managed domain in the selected hierarchy");
+            }
+
+            productIds.insert(geometry.entity()->id());
+            expectedDomains.insert(geometry.entity()->id());
+        } else {
+            for (const std::string& selectedId : selectedIds) {
+                Transform& transform = requireTransform(selectedId);
+
+                if (isSpatialDomain(transform.entity()) == domainMode) {
+                    productIds.insert(transform.entity()->id());
+                }
+            }
+
+            if (domainMode) {
+                for (const auto& [geometryId, geometry] : geometries_) {
+                    if (geometry->isEditorGeometry() &&
+                        geometry->isDomain() &&
+                        selectedIds.count(geometry->parentId()) != 0) {
+                        productIds.insert(geometry->entity()->id());
+                        expectedDomains.insert(geometry->entity()->id());
+                    }
+                }
+            }
+        }
+
+        if (productIds.empty()) {
+            emit(json{
+                {"event", "mesh.begin"},
+                {"vertexCount", 0},
+                {"indexCount", 0}});
+
+            if (includeMaterials) {
+                emit(json{
+                    {"event", "mesh.materials"},
+                    {"groups", json::array()}});
+            }
+
+            emit(json{{"event", "mesh.end"}});
+            return;
         }
 
         try {
@@ -362,19 +453,39 @@ public:
             auto kernel = std::make_unique<IfcGeom::OpenCascadeKernel>(settings);
             IfcGeom::Iterator iterator(std::move(kernel), settings, file_.get());
 
+            iterator.filters().push_back([&productIds](Entity* product) {
+                return product != nullptr &&
+                    productIds.count(product->id()) != 0;
+            });
+
             std::vector<double> vertices;
             std::vector<int> indices;
             std::vector<double> normals;
             std::vector<json> groups;
-            const Matrix4 outputTransform = worldSpace ? identityMatrix() : inverseRigidMatrix(transformWorldMatrix(root));
+            Matrix4 outputTransform = worldSpace
+                ? identityMatrix()
+                : inverseRigidMatrix(transformWorldMatrix(root));
 
             if (iterator.initialize()) {
+                if (!worldSpace) {
+                    const double unitScale = iterator.unit_magnitude();
+
+                    outputTransform[3] *= unitScale;
+                    outputTransform[7] *= unitScale;
+                    outputTransform[11] *= unitScale;
+                }
+
                 do {
                     const auto* element = dynamic_cast<const IfcGeom::TriangulationElement*>(iterator.get());
                     if (element == nullptr || element->product() == nullptr || productIds.count(element->product()->id()) == 0) {
                         continue;
                     }
                     const auto& triangulation = element->geometry();
+
+                    if (!triangulation.faces().empty()) {
+                        expectedDomains.erase(element->product()->id());
+                    }
+
                     const std::size_t vertexOffset = vertices.size() / 3;
                     const std::size_t indexOffset = indices.size();
                     const auto& elementVertices = triangulation.verts();
@@ -398,7 +509,9 @@ public:
                             normals.insert(normals.end(), direction.begin(), direction.end());
                         }
                     }
-                    if (includeMaterials && indices.size() > indexOffset) {
+                    if (includeMaterials &&
+                        !domainMode &&
+                        indices.size() > indexOffset) {
                         const auto transformIterator = transformByEntity_.find(element->product());
                         if (transformIterator != transformByEntity_.end()) {
                             const auto& materialIds = requireTransform(transformIterator->second).materialIds();
@@ -414,6 +527,12 @@ public:
             }
             if (iterator.had_error_processing_elements()) {
                 throw SceneError("TESSELLATION_FAILED", "IfcOpenShell reported geometry processing errors");
+            }
+
+            if (!expectedDomains.empty()) {
+                throw SceneError(
+                    "TESSELLATION_FAILED",
+                    "One or more domains could not be tessellated");
             }
 
             emit(json{{"event", "mesh.begin"}, {"vertexCount", vertices.size() / 3}, {"indexCount", indices.size()}});
@@ -433,7 +552,9 @@ public:
         }
     }
 
-    json geometryGetAll(const std::optional<std::string>& transformId) {
+    json geometryGetAll(
+        const std::optional<std::string>& transformId,
+        const std::string& kind = "ALL") {
         requireLoaded();
         if (transformId.has_value()) {
             requireTransform(*transformId);
@@ -444,6 +565,9 @@ public:
             if (transformId.has_value() && geometry.parentId() != *transformId) {
                 continue;
             }
+            if (kind != "ALL" && geometry.kind() != kind) {
+                continue;
+            }
             const auto global = geometry.globalId();
             result.push_back(json{
                 {"id", id},
@@ -452,7 +576,8 @@ public:
                 {"parentId", geometry.parentId()},
                 {"source", geometry.isEditorGeometry() ? "editor" : "ifc"},
                 {"editable", geometry.editable()},
-                {"operation", geometry.operation()}});
+                {"operation", geometry.operation()},
+                {"kind", geometry.kind()}});
         }
         return result;
     }
@@ -468,8 +593,20 @@ public:
         const json& transformInput,
         const json& profileInput,
         double depth,
-        const std::string& operation) {
+        const std::string& operation,
+        const std::string& kind = "SOLID") {
         requireLoaded();
+
+        if (kind != "SOLID" && kind != "DOMAIN") {
+            throw SceneError("INVALID_PARAMETERS", "Invalid geometry kind");
+        }
+
+        if (kind == "DOMAIN" && operation != "ADD") {
+            throw SceneError(
+                "INVALID_PARAMETERS",
+                "Domain operation must be ADD");
+        }
+
         Transform& parent = requireTransform(parentId);
         Matrix4 requested = matrixFromJson(transformInput.at("matrix"));
         validateRigidMatrix(requested);
@@ -479,7 +616,12 @@ public:
         }
         const Profile2D profile = profileFromJson(profileInput);
         validateProfile(profile);
-        Entity* feature = asEntity(createFeatureElement(*file_, parent.entity(), name, local, profile, depth, operation));
+        Entity* feature = asEntity(
+            kind == "DOMAIN"
+                ? createDomainElement(
+                    *file_, parent.entity(), name, local, profile, depth)
+                : createFeatureElement(
+                    *file_, parent.entity(), name, local, profile, depth, operation));
         if (feature == nullptr) {
             throw SceneError("INTERNAL_ERROR", "Created geometry feature is not an IFC entity");
         }
@@ -496,6 +638,13 @@ public:
         if (!geometry.editable()) {
             throw SceneError("GEOMETRY_NOT_EDITABLE", "Geometry is not editable", json{{"id", id}});
         }
+        if (geometry.isDomain() && changes.contains("operation") &&
+            changes.at("operation").get<std::string>() != "ADD") {
+            throw SceneError(
+                "INVALID_PARAMETERS",
+                "Domain operation must be ADD");
+        }
+
         if (changes.contains("name")) {
             geometry.setName(changes.at("name").get<std::string>());
         }
@@ -622,6 +771,13 @@ public:
         requireLoaded();
         Material& material = requireMaterial(materialId);
         Target target = resolveTarget(targetId);
+
+        if (isManagedDomain(target.entity)) {
+            throw SceneError(
+                "INVALID_RELATION",
+                "Simulation domains cannot receive physical materials");
+        }
+
         if (assignmentExists(material, target)) {
             return json{{"materialId", materialId}, {"targetId", targetId}};
         }
@@ -1074,7 +1230,8 @@ private:
                     json{{"space", "parent"}, {"matrix", matrixToJson(source.localMatrix())}},
                     profileToJson(source.profile()),
                     source.depth(),
-                    source.operation());
+                    source.operation(),
+                    source.kind());
                 const std::string duplicateGeometryId = duplicate.at("id").get<std::string>();
                 geometryMapping[sourceGeometryId] = duplicateGeometryId;
                 for (const std::string& materialId : materialIds) {
@@ -1190,6 +1347,9 @@ private:
         std::vector<Base*> ordered(candidates.begin(), candidates.end());
         std::sort(ordered.begin(), ordered.end(), [](const Base* lhs, const Base* rhs) { return lhs->id() < rhs->id(); });
         for (Base* candidate : ordered) {
+            if (isManagedDomain(candidate)) {
+                continue;
+            }
             Entity* entity = asEntity(candidate);
             if (entity == nullptr) {
                 continue;
@@ -1211,6 +1371,35 @@ private:
             Entity* parent = asEntity(getEntityAttribute(relation, "RelatingElement"));
             Entity* feature = asEntity(getEntityAttribute(relation, "RelatedFeatureElement"));
             addEditorGeometry(parent, feature, editorFeatures);
+        }
+
+        for (Base* relation : instancesByType(*file_, "IfcRelAssignsToProduct")) {
+            if (!isDomainParentRelation(relation)) {
+                continue;
+            }
+
+            Entity* parent = asEntity(
+                getEntityAttribute(relation, "RelatingProduct"));
+
+            for (Base* related : aggregateToVector(
+                getEntityAggregate(relation, "RelatedObjects"))) {
+                if (isManagedDomain(related)) {
+                    addEditorGeometry(
+                        parent,
+                        asEntity(related),
+                        editorFeatures);
+                }
+            }
+        }
+
+        for (Base* domain : instancesByType(*file_, "IfcSpatialZone")) {
+            if (isManagedDomain(domain) &&
+                geometryByEntity_.count(domain) == 0) {
+                throw SceneError(
+                    "INVALID_RELATION",
+                    "Managed domain has no valid parent",
+                    json{{"ifcEntityId", domain->id()}});
+            }
         }
 
         for (const auto& [transformId, transform] : transforms_) {

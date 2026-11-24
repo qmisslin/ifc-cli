@@ -213,8 +213,35 @@ void validateOperation(const std::string& operation) {
     }
 }
 
+void validateGeometryKind(const std::string& kind, bool allowAll = false) {
+    if (kind != "SOLID" && kind != "DOMAIN" &&
+        !(allowAll && kind == "ALL")) {
+        invalidParameters(
+            "Invalid geometry kind",
+            json{{"kind", kind}});
+    }
+}
+
 void validateTessellationOptions(const json& value) {
-    requireExactFields(value, {"space", "includeNormals", "includeMaterials", "includeChildren"});
+    requireExactFields(
+        value,
+        {"space", "includeNormals", "includeMaterials", "includeChildren"},
+        {"kind", "geometryId"});
+
+    if (value.contains("kind")) {
+        validateGeometryKind(requireString(value, "kind", true));
+    }
+
+    if (value.contains("geometryId")) {
+        validateSessionId(
+            value.at("geometryId"),
+            "geometryId",
+            {"geometry"});
+
+        if (value.value("kind", std::string("SOLID")) != "DOMAIN") {
+            invalidParameters("geometryId requires DOMAIN tessellation");
+        }
+    }
     const std::string space = requireString(value, "space", true);
     if (space != "local" && space != "world") {
         invalidParameters("Tessellation space must be local or world", json{{"field", "options.space"}});
@@ -284,7 +311,12 @@ void validateCommand(const ProtocolRequest& request) {
         return;
     }
     if (command == "geometryGetAll") {
-        requireExactFields(params, {"transformId"});
+        requireExactFields(params, {"transformId"}, {"kind"});
+
+        if (params.contains("kind")) {
+            validateGeometryKind(requireString(params, "kind", true), true);
+        }
+
         if (!params.at("transformId").is_null()) {
             validateSessionId(params.at("transformId"), "transformId", {"transform"});
         }
@@ -296,13 +328,26 @@ void validateCommand(const ProtocolRequest& request) {
         return;
     }
     if (command == "geometryCreate") {
-        requireExactFields(params, {"parentId", "name", "transform", "profile", "depth", "operation"});
+        requireExactFields(
+            params,
+            {"parentId", "name", "transform", "profile", "depth", "operation"},
+            {"kind"});
+
+        if (params.contains("kind")) {
+            validateGeometryKind(requireString(params, "kind", true));
+        }
         validateSessionId(params.at("parentId"), "parentId", {"transform"});
         requireString(params, "name");
         validateTransformInput(params.at("transform"));
         validateProfile(params.at("profile"));
         requireFiniteNumber(params, "depth", true);
         validateOperation(requireString(params, "operation", true));
+
+        if (params.value("kind", std::string("SOLID")) == "DOMAIN" &&
+            params.at("operation") != "ADD") {
+            invalidParameters("Domain operation must be ADD");
+        }
+
         return;
     }
     if (command == "geometryUpdate") {
@@ -380,7 +425,12 @@ json helpResult() {
         "Commands: help, getCapabilities, load, save, exit, transformGetAll, transformGet, "
         "transformCreate, transformDuplicate, transformUpdate, transformDelete, transformTessellate, geometryGetAll, "
         "geometryGet, geometryCreate, geometryUpdate, geometryDelete, materialGetAll, materialGet, "
-        "materialCreate, materialUpdate, materialDelete, materialAssign, materialUnassign.";
+        "materialCreate, materialUpdate, materialDelete, materialAssign, materialUnassign.\n"
+        "Geometry kinds: SOLID, DOMAIN.\n"
+        "geometryCreate: optional kind, default SOLID.\n"
+        "geometryGetAll: optional kind, default ALL.\n"
+        "transformTessellate: optional options.kind, default SOLID.\n"
+        "DOMAIN tessellation supports optional options.geometryId.";
     return json{{"documentation", documentation}};
 }
 
@@ -435,7 +485,9 @@ json dispatchSingle(IfcScene& scene, const ProtocolRequest& request) {
     if (command == "geometryGetAll") {
         const std::optional<std::string> transformId = params.at("transformId").is_null() ?
             std::nullopt : std::optional<std::string>(params.at("transformId").get<std::string>());
-        return scene.geometryGetAll(transformId);
+        return scene.geometryGetAll(
+            transformId,
+            params.value("kind", std::string("ALL")));
     }
     if (command == "geometryGet") {
         return scene.geometryGet(params.at("id").get<std::string>());
@@ -447,7 +499,8 @@ json dispatchSingle(IfcScene& scene, const ProtocolRequest& request) {
             params.at("transform"),
             params.at("profile"),
             params.at("depth").get<double>(),
-            params.at("operation").get<std::string>());
+            params.at("operation").get<std::string>(),
+            params.value("kind", std::string("SOLID")));
     }
     if (command == "geometryUpdate") {
         return scene.geometryUpdate(params.at("id").get<std::string>(), params);

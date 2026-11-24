@@ -215,6 +215,66 @@ inline Base* createProductDefinitionShape(IfcParse::IfcFile& file, Base* represe
     return productDefinitionShape;
 }
 
+inline bool isSpatialDomain(const Base* entity) {
+    return isA(entity, "IfcSpace") || isA(entity, "IfcSpatialZone");
+}
+
+inline bool isManagedDomain(const Base* entity) {
+    return isA(entity, "IfcSpatialZone") &&
+        getString(entity, "ObjectType") == "ifc-cli:domain";
+}
+
+inline bool isDomainParentRelation(const Base* relation) {
+    return isA(relation, "IfcRelAssignsToProduct") &&
+        getString(relation, "Name") == "ifc-cli:domain-parent";
+}
+
+inline Base* createDomainElement(
+    IfcParse::IfcFile& file,
+    Base* parent,
+    const std::string& name,
+    const Matrix4& localMatrix,
+    const Profile2D& profile,
+    double depth) {
+    Base* parentPlacement = getEntityAttribute(parent, "ObjectPlacement");
+
+    if (!isA(parent, "IfcProduct") ||
+        !isA(parentPlacement, "IfcLocalPlacement")) {
+        throw SceneError(
+            "INVALID_RELATION",
+            "A domain requires a product parent with a local placement");
+    }
+
+    Base* domain = createGeometryInstance(file, "IfcSpatialZone");
+    initializeRoot(file, domain, name);
+
+    setAttribute(domain, "ObjectType", std::string("ifc-cli:domain"));
+
+    if (hasAttribute(domain, "PredefinedType")) {
+        setEnumeration(domain, "PredefinedType", "USERDEFINED");
+    }
+
+    setEntityAttribute(
+        domain,
+        "ObjectPlacement",
+        createLocalPlacement(file, parentPlacement, localMatrix));
+
+    Base* solid = createExtrudedAreaSolid(file, profile, depth);
+
+    setEntityAttribute(
+        domain,
+        "Representation",
+        createProductDefinitionShape(file, solid));
+
+    Base* relation = createGeometryInstance(file, "IfcRelAssignsToProduct");
+
+    initializeRoot(file, relation, "ifc-cli:domain-parent");
+    setEntityAttribute(relation, "RelatingProduct", parent);
+    setAttribute(relation, "RelatedObjects", makeAggregate({domain}));
+
+    return domain;
+}
+
 inline bool canReceiveOperation(const Base* parent, const std::string& operation) {
     if (parent == nullptr || !isA(parent, "IfcElement")) {
         return false;
@@ -371,6 +431,9 @@ inline void replaceDepth(Base* feature, double depth) {
 }
 
 inline std::string operationForFeature(const Base* feature) {
+    if (isManagedDomain(feature)) {
+        return "ADD";
+    }
     if (isA(feature, "IfcOpeningElement")) {
         return "SUBTRACT";
     }
@@ -381,6 +444,18 @@ inline std::string operationForFeature(const Base* feature) {
 }
 
 inline Base* findOperationRelation(IfcParse::IfcFile& file, Base* feature, const std::string& operation) {
+    if (isManagedDomain(feature)) {
+        for (Base* relation : instancesByType(file, "IfcRelAssignsToProduct")) {
+            if (isDomainParentRelation(relation) &&
+                aggregateContains(
+                    getEntityAggregate(relation, "RelatedObjects"),
+                    feature)) {
+                return relation;
+            }
+        }
+        return nullptr;
+    }
+
     if (operation == "SUBTRACT") {
         for (Base* relation : instancesByType(file, "IfcRelVoidsElement")) {
             if (getEntityAttribute(relation, "RelatedOpeningElement") == feature) {
@@ -507,6 +582,17 @@ public:
         return operation_;
     }
 
+    bool isDomain() const {
+        if (source_ == Source::Editor) {
+            return isManagedDomain(entity_);
+        }
+        return isSpatialDomain(parent_);
+    }
+
+    std::string kind() const {
+        return isDomain() ? "DOMAIN" : "SOLID";
+    }
+
     std::string name() const {
         return source_ == Source::Editor ? getString(entity_, "Name") : std::string();
     }
@@ -568,6 +654,13 @@ public:
 
     std::vector<Base*> convertOperation(IfcParse::IfcFile& file, const std::string& nextOperation) {
         requireEditable();
+
+        if (isDomain() && nextOperation != "ADD") {
+            throw SceneError(
+                "INVALID_PARAMETERS",
+                "Domain operation must be ADD");
+        }
+
         if (nextOperation != "ADD" && nextOperation != "SUBTRACT") {
             throw SceneError("INVALID_PARAMETERS", "Geometry operation must be ADD or SUBTRACT");
         }
@@ -620,6 +713,7 @@ public:
             {"editable", editable_},
             {"ifcClass", entity_->declaration().name()},
             {"operation", operation_},
+            {"kind", kind()},
             {"parentId", parentId_}};
 
         if (source_ == Source::Editor) {
