@@ -1765,16 +1765,62 @@ private:
         transformByEntity_[duplicate] = duplicateId;
         replaceSpatialParent(duplicate, parents.spatial == nullptr ? nullptr : parents.spatial->entity());
         replaceDecompositionParent(duplicate, parents.decomposition == nullptr ? nullptr : parents.decomposition->entity());
-        replaceOccurrenceProperties(*file_, duplicate, readOccurrenceProperties(*file_, sourceEntity));
         return duplicateId;
     }
 
-    void copyDuplicateRelations(const std::unordered_map<std::string, std::string>& mapping) {
+        void copyDuplicateRelations(const std::unordered_map<std::string, std::string>& mapping) {
         for (const auto& [sourceId, duplicateId] : mapping) {
             Base* source = requireTransform(sourceId).entity();
             Base* duplicate = requireTransform(duplicateId).entity();
+
+            std::unordered_map<const Base*, Base*> propertyMapping;
+
+            const EntityMapper cloneProperty = [&](Base* referenced) -> Base* {
+                if (referenced == nullptr || referenced->id() == 0) {
+                    return referenced;
+                }
+
+                // Preserve shared units, external references and other
+                // entities outside the occurrence property graph.
+                if (!isA(referenced, "IfcPropertySet") &&
+                    !isA(referenced, "IfcProperty") &&
+                    !isA(referenced, "IfcPropertyEnumeration")) {
+                    return referenced;
+                }
+
+                const auto existing = propertyMapping.find(referenced);
+
+                if (existing != propertyMapping.end()) {
+                    return existing->second;
+                }
+
+                Base* cloned = createInstance(
+                    *file_,
+                    referenced->declaration().name());
+
+                propertyMapping.emplace(referenced, cloned);
+
+                copyEntityAttributes(
+                    referenced,
+                    cloned,
+                    {"GlobalId"},
+                    cloneProperty);
+
+                if (hasAttribute(cloned, "GlobalId")) {
+                    IfcParse::IfcGlobalId globalId;
+
+                    setAttribute(
+                        cloned,
+                        "GlobalId",
+                        static_cast<const std::string&>(globalId));
+                }
+
+                return cloned;
+            };
+
             const std::vector<Base*> references = aggregateToVector(
                 file_->instances_by_reference(static_cast<int>(source->id())));
+
             for (Base* relation : references) {
                 if (relation == nullptr ||
                     !isA(relation, "IfcRelationship") ||
@@ -1782,23 +1828,75 @@ private:
                     !aggregateContains(getEntityAggregate(relation, "RelatedObjects"), source)) {
                     continue;
                 }
+
                 if (isA(relation, "IfcRelContainedInSpatialStructure") ||
                     isA(relation, "IfcRelAggregates") ||
                     isA(relation, "IfcRelNests") ||
                     isA(relation, "IfcRelAssociatesMaterial")) {
                     continue;
                 }
+
                 if (isA(relation, "IfcRelDefinesByProperties")) {
-                    Base* definition = getEntityAttribute(relation, "RelatingPropertyDefinition");
-                    const auto relatedObjects = getEntityAggregate(relation, "RelatedObjects");
+                    Base* definition = getEntityAttribute(
+                        relation,
+                        "RelatingPropertyDefinition");
+
+                    const auto relatedObjects = getEntityAggregate(
+                        relation,
+                        "RelatedObjects");
+
                     if (definition != nullptr &&
                         isA(definition, "IfcPropertySet") &&
                         relatedObjects != nullptr &&
                         relatedObjects->size() == 1) {
+
+                        // Duplicate the complete occurrence property set,
+                        // including unsupported native property types.
+                        Base* duplicateDefinition = cloneProperty(definition);
+
+                        Base* duplicateRelation = createInstance(
+                            *file_,
+                            relation->declaration().name());
+
+                        copyEntityAttributes(
+                            relation,
+                            duplicateRelation,
+                            {
+                                "GlobalId",
+                                "RelatedObjects",
+                                "RelatingPropertyDefinition"
+                            },
+                            [](Base* referenced) -> Base* {
+                                return referenced;
+                            });
+
+                        IfcParse::IfcGlobalId globalId;
+
+                        setAttribute(
+                            duplicateRelation,
+                            "GlobalId",
+                            static_cast<const std::string&>(globalId));
+
+                        setAttribute(
+                            duplicateRelation,
+                            "RelatedObjects",
+                            makeAggregate({duplicate}));
+
+                        setEntityAttribute(
+                            duplicateRelation,
+                            "RelatingPropertyDefinition",
+                            duplicateDefinition);
+
                         continue;
                     }
                 }
-                appendUniqueToAggregate(relation, "RelatedObjects", duplicate);
+
+                // Preserve existing shared relationships, including
+                // type definitions, quantities and shared property sets.
+                appendUniqueToAggregate(
+                    relation,
+                    "RelatedObjects",
+                    duplicate);
             }
         }
     }
