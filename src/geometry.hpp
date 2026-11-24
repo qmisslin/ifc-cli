@@ -763,74 +763,147 @@ private:
 
     void deleteNativeFromIfc(IfcParse::IfcFile& file) {
         std::vector<Base*> emptyShapeRepresentations;
-        for (Base* shapeRepresentation : instancesByType(file, "IfcShapeRepresentation")) {
+
+        for (Base* shapeRepresentation :
+            instancesByType(file, "IfcShapeRepresentation")) {
+
             if (!hasAttribute(shapeRepresentation, "Items")) {
                 continue;
             }
-            const auto currentItems = aggregateToVector(getEntityAggregate(shapeRepresentation, "Items"));
-            if (std::find(currentItems.begin(), currentItems.end(), entity_) == currentItems.end()) {
+
+            const auto currentItems = aggregateToVector(
+                getEntityAggregate(shapeRepresentation, "Items"));
+
+            if (std::find(
+                currentItems.begin(),
+                currentItems.end(),
+                entity_) == currentItems.end()) {
                 continue;
             }
+
             std::vector<Base*> nextItems;
+
             for (Base* item : currentItems) {
                 if (item != entity_) {
                     nextItems.push_back(item);
                 }
             }
+
             if (nextItems.empty()) {
-                emptyShapeRepresentations.push_back(shapeRepresentation);
+                emptyShapeRepresentations.push_back(
+                    shapeRepresentation);
             } else {
-                setAttribute(shapeRepresentation, "Items", makeAggregate(nextItems));
+                setAttribute(
+                    shapeRepresentation,
+                    "Items",
+                    makeAggregate(nextItems));
             }
         }
 
-        file.removeEntity(entity_);
+        // Explicit geometry deletion removes the representation item.
+        // Its dependencies are removed only when no references remain.
+        removeIfcDependencyGraph(
+            file,
+            entity_->id(),
+            isGeometryDependency,
+            true);
+
         for (Base* shapeRepresentation : emptyShapeRepresentations) {
-            for (Base* productShape : instancesByType(file, "IfcProductDefinitionShape")) {
+            for (Base* productShape :
+                instancesByType(file, "IfcProductDefinitionShape")) {
+
                 if (!hasAttribute(productShape, "Representations")) {
                     continue;
                 }
-                removeFromAggregate(productShape, "Representations", shapeRepresentation);
-                const auto remainingRepresentations = getEntityAggregate(productShape, "Representations");
-                if (remainingRepresentations == nullptr || remainingRepresentations->size() == 0) {
+
+                // Do not modify unrelated product representations.
+                if (!removeFromAggregate(
+                    productShape,
+                    "Representations",
+                    shapeRepresentation)) {
+                    continue;
+                }
+
+                const auto remainingRepresentations =
+                    getEntityAggregate(
+                        productShape,
+                        "Representations");
+
+                if (remainingRepresentations == nullptr ||
+                    remainingRepresentations->size() == 0) {
                     file.removeEntity(productShape);
                 }
             }
-            file.removeEntity(shapeRepresentation);
+
+            removeIfcDependencyGraph(
+                file,
+                shapeRepresentation->id(),
+                isGeometryDependency);
         }
     }
 
-    void deleteEditorFromIfc(IfcParse::IfcFile& file) {
-        Base* relation = findOperationRelation(file, entity_, operation_);
-        Base* objectPlacement = getEntityAttribute(entity_, "ObjectPlacement");
-        Base* productShape = getEntityAttribute(entity_, "Representation");
-        Base* solid = findExtrudedSolid(entity_);
-        Base* sweptArea = getEntityAttribute(solid, "SweptArea");
-        Base* outerCurve = getEntityAttribute(sweptArea, "OuterCurve");
-        std::vector<Base*> curvePoints = aggregateToVector(getEntityAggregate(outerCurve, "Points"));
-        Base* solidPosition = getEntityAttribute(solid, "Position");
-        Base* solidDirection = getEntityAttribute(solid, "ExtrudedDirection");
-        std::vector<Base*> representations = aggregateToVector(getEntityAggregate(productShape, "Representations"));
-        std::vector<Base*> placementEntities = collectPlacementOwnedEntities(objectPlacement);
+        void deleteEditorFromIfc(IfcParse::IfcFile& file) {
+        Base* relation = findOperationRelation(
+            file,
+            entity_,
+            operation_);
 
+        Base* objectPlacement = getEntityAttribute(
+            entity_,
+            "ObjectPlacement");
+
+        Base* productShape = getEntityAttribute(
+            entity_,
+            "Representation");
+
+        const unsigned placementId =
+            isA(objectPlacement, "IfcLocalPlacement")
+                ? objectPlacement->id()
+                : 0;
+
+        const unsigned productShapeId =
+            productShape != nullptr
+                ? productShape->id()
+                : 0;
+
+        // Remove the operation relationship before the feature.
         if (relation != nullptr) {
-            file.removeEntity(relation);
+            if (isManagedDomain(entity_)) {
+                removeFromAggregate(
+                    relation,
+                    "RelatedObjects",
+                    entity_);
+
+                const auto remaining =
+                    getEntityAggregate(
+                        relation,
+                        "RelatedObjects");
+
+                if (remaining == nullptr || remaining->size() == 0) {
+                    file.removeEntity(relation);
+                }
+            } else {
+                file.removeEntity(relation);
+            }
         }
+
         file.removeEntity(entity_);
-        for (Base* representation : representations) {
-            removeIfUnreferenced(file, representation);
+
+        // Remove the placement without traversing PlacementRelTo.
+        // Parent product placements must remain untouched.
+        if (placementId != 0) {
+            removeIfcDependencyGraph(
+                file,
+                placementId,
+                isGeometryDependency);
         }
-        removeIfUnreferenced(file, productShape);
-        removeIfUnreferenced(file, solid);
-        removeIfUnreferenced(file, sweptArea);
-        removeIfUnreferenced(file, outerCurve);
-        for (Base* point : curvePoints) {
-            removeIfUnreferenced(file, point);
-        }
-        removeIfUnreferenced(file, solidPosition);
-        removeIfUnreferenced(file, solidDirection);
-        for (Base* placementEntity : placementEntities) {
-            removeIfUnreferenced(file, placementEntity);
+
+        // Remove the complete representation graph in ownership order.
+        if (productShapeId != 0) {
+            removeIfcDependencyGraph(
+                file,
+                productShapeId,
+                isGeometryDependency);
         }
     }
 

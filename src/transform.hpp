@@ -1167,6 +1167,121 @@ inline void removeUniqueIfUnreferenced(IfcParse::IfcFile& file, const std::vecto
     }
 }
 
+inline bool isGeometryDependency(const Base* entity) {
+    return isA(entity, "IfcRepresentationItem") ||
+        isA(entity, "IfcProfileDef") ||
+        isA(entity, "IfcRepresentation") ||
+        isA(entity, "IfcProductRepresentation") ||
+        isA(entity, "IfcRepresentationMap");
+}
+
+inline bool isPropertyDependency(const Base* entity) {
+    return isA(entity, "IfcProperty") ||
+        isA(entity, "IfcPropertySet") ||
+        isA(entity, "IfcPropertyEnumeration") ||
+        isA(entity, "IfcPhysicalQuantity") ||
+        isA(entity, "IfcElementQuantity");
+}
+
+inline void removeIfcDependencyGraph(
+    IfcParse::IfcFile& file,
+    unsigned entityId,
+    const std::function<bool(const Base*)>& isDependency,
+    bool forceRoot = false) {
+
+    Base* entity = nullptr;
+
+    try {
+        entity = file.instance_by_id(
+            static_cast<int>(entityId));
+    } catch (const std::exception&) {
+        // The entity may have been removed through another dependency path.
+        return;
+    }
+
+    if (entity == nullptr || asEntity(entity) == nullptr) {
+        return;
+    }
+
+    if (!forceRoot && file.getTotalInverses(entityId) != 0) {
+        return;
+    }
+
+    std::set<unsigned> dependencies;
+
+    const auto collectDependency = [&](Base* referenced) {
+        if (referenced != nullptr &&
+            referenced->id() != 0 &&
+            referenced->id() != entityId &&
+            asEntity(referenced) != nullptr &&
+            isDependency(referenced)) {
+            dependencies.insert(referenced->id());
+        }
+    };
+
+    const auto* declaration = entity->declaration().as_entity();
+    const auto attributes = declaration->all_attributes();
+
+    // Collect dependency identifiers before removing the owning entity.
+    for (std::size_t index = 0; index < attributes.size(); ++index) {
+        const AttributeValue value =
+            entity->get_attribute_value(index);
+
+        if (value.isNull()) {
+            continue;
+        }
+
+        switch (value.type()) {
+            case IfcUtil::Argument_ENTITY_INSTANCE:
+                collectDependency(static_cast<Base*>(value));
+                break;
+
+            case IfcUtil::Argument_AGGREGATE_OF_ENTITY_INSTANCE: {
+                const auto aggregate =
+                    static_cast<boost::shared_ptr<aggregate_of_instance>>(
+                        value);
+
+                for (Base* referenced : aggregateToVector(aggregate)) {
+                    collectDependency(referenced);
+                }
+
+                break;
+            }
+
+            case IfcUtil::Argument_AGGREGATE_OF_AGGREGATE_OF_ENTITY_INSTANCE: {
+                const auto aggregate =
+                    static_cast<boost::shared_ptr<aggregate_of_aggregate_of_instance>>(
+                        value);
+
+                for (
+                    auto outer = aggregate->begin();
+                    outer != aggregate->end();
+                    ++outer
+                ) {
+                    for (Base* referenced : *outer) {
+                        collectDependency(referenced);
+                    }
+                }
+
+                break;
+            }
+
+            default:
+                break;
+        }
+    }
+
+    // Remove the owner before checking its dependencies.
+    file.removeEntity(entity);
+
+    for (unsigned dependencyId : dependencies) {
+        removeIfcDependencyGraph(
+            file,
+            dependencyId,
+            isDependency);
+    }
+}
+
 inline void replaceOccurrenceProperties(
     IfcParse::IfcFile& file,
     Base* object,

@@ -2420,9 +2420,14 @@ private:
     }
 
     void removePlacementIfUnreferenced(Base* placement) {
-        for (Base* entity : collectPlacementOwnedEntities(placement)) {
-            removeIfUnreferenced(*file_, entity);
+        if (!isA(placement, "IfcLocalPlacement")) {
+            return;
         }
+
+        removeIfcDependencyGraph(
+            *file_,
+            placement->id(),
+            isGeometryDependency);
     }
 
     void collectTransformChildren(std::unordered_set<std::string>& output) {
@@ -2486,41 +2491,92 @@ private:
         removeIfUnreferenced(*file_, representation);
     }
 
-    void removeRelationshipsReferencing(Base* entity) {
+        void removeRelationshipsReferencing(Base* entity) {
         std::vector<Base*> relations;
-        for (Base* candidate : aggregateToVector(file_->instances_by_reference(static_cast<int>(entity->id())))) {
-            if (candidate != nullptr && isA(candidate, "IfcRelationship")) {
+
+        for (Base* candidate : aggregateToVector(
+            file_->instances_by_reference(
+                static_cast<int>(entity->id())))) {
+
+            if (candidate != nullptr &&
+                isA(candidate, "IfcRelationship")) {
                 relations.push_back(candidate);
             }
         }
-        std::sort(relations.begin(), relations.end());
-        relations.erase(std::unique(relations.begin(), relations.end()), relations.end());
-        std::vector<Base*> cleanupCandidates;
+
+        std::sort(
+            relations.begin(),
+            relations.end());
+
+        relations.erase(
+            std::unique(
+                relations.begin(),
+                relations.end()),
+            relations.end());
+
+        std::set<unsigned> cleanupCandidates;
+
         for (Base* relation : relations) {
             bool retained = false;
-            for (const std::string& attribute : {"RelatedElements", "RelatedObjects"}) {
+
+            for (const std::string& attribute : {
+                "RelatedElements",
+                "RelatedObjects"
+            }) {
                 if (hasAttribute(relation, attribute) &&
-                    aggregateContains(getEntityAggregate(relation, attribute), entity)) {
-                    removeFromAggregate(relation, attribute, entity);
-                    const auto remaining = getEntityAggregate(relation, attribute);
-                    if (remaining != nullptr && remaining->size() != 0) {
+                    aggregateContains(
+                        getEntityAggregate(relation, attribute),
+                        entity)) {
+
+                    removeFromAggregate(
+                        relation,
+                        attribute,
+                        entity);
+
+                    const auto remaining =
+                        getEntityAggregate(
+                            relation,
+                            attribute);
+
+                    if (remaining != nullptr &&
+                        remaining->size() != 0) {
                         retained = true;
                     }
+
                     break;
                 }
             }
+
+            // Preserve relationships still used by other objects.
             if (retained) {
                 continue;
             }
+
             if (isA(relation, "IfcRelDefinesByProperties")) {
-                Base* propertyDefinition = getEntityAttribute(relation, "RelatingPropertyDefinition");
-                if (propertyDefinition != nullptr) {
-                    cleanupCandidates.push_back(propertyDefinition);
+                Base* propertyDefinition = getEntityAttribute(
+                    relation,
+                    "RelatingPropertyDefinition");
+
+                if (propertyDefinition != nullptr &&
+                    asEntity(propertyDefinition) != nullptr &&
+                    propertyDefinition->id() != 0) {
+
+                    cleanupCandidates.insert(
+                        propertyDefinition->id());
                 }
             }
+
             file_->removeEntity(relation);
         }
-        removeUniqueIfUnreferenced(*file_, cleanupCandidates);
+
+        // Remove unreferenced property definitions together with
+        // their exclusively owned properties and quantities.
+        for (unsigned candidateId : cleanupCandidates) {
+            removeIfcDependencyGraph(
+                *file_,
+                candidateId,
+                isPropertyDependency);
+        }
     }
 
     Target resolveTarget(const std::string& targetId) {

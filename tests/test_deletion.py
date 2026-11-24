@@ -1779,9 +1779,20 @@ class DeletionTests(unittest.TestCase):
                 geometry["id"]
             )
 
+        expected_survivor = {
+            **survivor,
+            "properties": [
+                property_input(
+                    "SharedReference",
+                    "SHARED-PROPERTY-VALUE",
+                    property_set="Pset_Shared"
+                )
+            ]
+        }
+
         self.assertEqual(
             self.get_transform(survivor["id"]),
-            survivor
+            expected_survivor
         )
 
         self.assert_mesh_equivalent(
