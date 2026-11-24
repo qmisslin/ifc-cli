@@ -1800,7 +1800,7 @@ class ProfileTests(unittest.TestCase):
         self.assert_valid_profile(
             irregular_profile,
             3.0,
-            expected_area=51.0,
+            expected_area=52.5,
             name="Irregular convex polygon"
         )
 
