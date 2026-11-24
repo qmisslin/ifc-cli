@@ -2391,6 +2391,73 @@ class BooleanOperationTests(unittest.TestCase):
         self.assert_operation_counts()
 
         self.assert_baseline_restored()
+        
+    def test_combined_complete_subtraction(self):
+        """Verify complete material removal using multiple adjacent tools."""
+
+        first = self.create_box(
+            operation="SUBTRACT",
+            name="First half subtraction",
+            x=-1.0,
+            y=-1.0,
+            z=-1.0,
+            width=6.0,
+            length=10.0,
+            depth=8.0
+        )
+
+        self.assert_physical_result(
+            expected_volume=240.0,
+            expected_bounds=(5, 0, 0, 10, 8, 6),
+            expected_surface=236.0
+        )
+
+        second = self.create_box(
+            operation="SUBTRACT",
+            name="Second half subtraction",
+            x=5.0,
+            y=-1.0,
+            z=-1.0,
+            width=6.0,
+            length=10.0,
+            depth=8.0
+        )
+
+        # Neither tool removes the entire solid independently.
+        # Their combined subtraction must produce an empty mesh.
+        self.assert_empty_mesh(
+            self.physical_mesh()
+        )
+
+        self.assert_empty_mesh(
+            self.physical_mesh(space="world")
+        )
+
+        self.assert_operation_counts(
+            subtractions=2
+        )
+
+        self.save_and_reload()
+
+        self.assert_empty_mesh(
+            self.physical_mesh()
+        )
+
+        first = self.find_geometry(first["globalId"])
+        second = self.find_geometry(second["globalId"])
+
+        self.delete_geometry(first["id"])
+
+        self.assert_physical_result(
+            expected_volume=240.0,
+            expected_bounds=(0, 0, 0, 5, 8, 6),
+            expected_surface=236.0
+        )
+
+        self.delete_geometry(second["id"])
+
+        self.assert_operation_counts()
+        self.assert_baseline_restored()
 
     def test_complete_subtraction(self):
         """Verify complete removal of physical material."""

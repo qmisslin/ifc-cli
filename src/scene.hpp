@@ -1319,21 +1319,73 @@ public:
 
                 const auto subtract = [&](
                     const TopoDS_Shape& first,
-                    const TopoDS_Shape& second,
+                    const std::vector<TopoDS_Shape>& subtractionShapes,
                     unsigned productId) {
 
-                    if (!hasFaces(first) || !hasFaces(second)) {
+                    if (!hasFaces(first) || subtractionShapes.empty()) {
                         return first;
                     }
 
-                    BRepAlgoAPI_Cut algorithm;
+                    // Keep the existing path for single-tool subtraction.
+                    if (subtractionShapes.size() == 1) {
+                        BRepAlgoAPI_Cut algorithm;
 
-                    return performBoolean(
-                        algorithm,
-                        first,
-                        second,
-                        "SUBTRACT",
-                        productId);
+                        return performBoolean(
+                            algorithm,
+                            first,
+                            subtractionShapes.front(),
+                            "SUBTRACT",
+                            productId);
+                    }
+
+                    TopTools_ListOfShape arguments;
+                    TopTools_ListOfShape tools;
+
+                    arguments.Append(first);
+
+                    for (const TopoDS_Shape& shape : subtractionShapes) {
+                        tools.Append(shape);
+                    }
+
+                    // Perform all subtractions in a single boolean operation.
+                    try {
+                        BRepAlgoAPI_Cut algorithm;
+
+                        algorithm.SetArguments(arguments);
+                        algorithm.SetTools(tools);
+                        algorithm.SetNonDestructive(true);
+                        algorithm.SetRunParallel(false);
+
+                        algorithm.Build();
+
+                        if (algorithm.IsDone() && !algorithm.HasErrors()) {
+                            return algorithm.Shape();
+                        }
+
+                    } catch (const Standard_Failure&) {
+                        // Fall back to sequential subtraction.
+                    }
+
+                    // Preserve compatibility with geometries that cannot
+                    // be processed by a single multi-tool operation.
+                    TopoDS_Shape result = first;
+
+                    for (const TopoDS_Shape& shape : subtractionShapes) {
+                        if (!hasFaces(result)) {
+                            break;
+                        }
+
+                        BRepAlgoAPI_Cut algorithm;
+
+                        result = performBoolean(
+                            algorithm,
+                            result,
+                            shape,
+                            "SUBTRACT",
+                            productId);
+                    }
+
+                    return result;
                 };
 
                 const auto featureShapes = [&](
@@ -1397,18 +1449,25 @@ public:
                         }
                     }
 
-                    // Apply all subtractive operations to the complete
-                    // additive result, including projected material.
-                    for (unsigned featureId : operations.subtractions) {
-                        const auto& tools = featureShapes(featureId);
+                    // Collect all subtractive BRep tools for this product.
+                    std::vector<TopoDS_Shape> subtractionShapes;
 
-                        for (const TopoDS_Shape& shape : tools) {
-                            physical = subtract(
-                                physical,
-                                shape,
-                                productId);
+                    for (unsigned featureId : operations.subtractions) {
+                        for (
+                            const TopoDS_Shape& shape :
+                            featureShapes(featureId)
+                        ) {
+                            if (hasFaces(shape)) {
+                                subtractionShapes.push_back(shape);
+                            }
                         }
                     }
+
+                    // Subtract all tools from the complete additive result.
+                    physical = subtract(
+                        physical,
+                        subtractionShapes,
+                        productId);
 
                     // Complete subtraction is a valid empty result.
                     if (!hasFaces(physical)) {
