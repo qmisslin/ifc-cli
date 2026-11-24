@@ -333,6 +333,16 @@ inline Base* createFeatureElement(
         throw SceneError("INVALID_PARAMETERS", "Geometry operation must be ADD or SUBTRACT");
     }
 
+    if (!canReceiveOperation(parent, operation)) {
+        throw SceneError(
+            "GEOMETRY_OPERATION_NOT_SUPPORTED",
+            "Target transform cannot receive the requested geometry operation",
+            json{
+                {"operation", operation},
+                {"ifcClass", parent == nullptr ? json(nullptr) : json(parent->declaration().name())}
+            });
+    }
+
     Base* feature = createGeometryInstance(file, className);
     initializeRoot(file, feature, name);
     if (hasAttribute(feature, "ObjectType")) {
