@@ -607,47 +607,110 @@ public:
                 resolver)}};
     }
 
-    void deleteFromIfc(IfcParse::IfcFile& file) {
-        std::vector<Base*> propertyContainers = materialPropertyContainers(file, entity_);
+        void deleteFromIfc(IfcParse::IfcFile& file) {
+        std::vector<Base*> propertyContainers =
+            materialPropertyContainers(file, entity_);
+
         std::vector<Base*> propertyEntities;
+
         for (Base* container : propertyContainers) {
-            const auto properties = aggregateToVector(getEntityAggregate(container, materialPropertiesAggregateAttribute(container)));
-            propertyEntities.insert(propertyEntities.end(), properties.begin(), properties.end());
+            const auto properties = aggregateToVector(
+                getEntityAggregate(
+                    container,
+                    materialPropertiesAggregateAttribute(container)));
+
+            propertyEntities.insert(
+                propertyEntities.end(),
+                properties.begin(),
+                properties.end());
         }
 
         std::vector<Base*> definitionRepresentations;
         std::vector<Base*> representations;
         std::vector<Base*> styledItems;
+        std::vector<Base*> presentationStyleAssignments;
         std::vector<Base*> surfaceStyles;
         std::vector<Base*> renderingStyles;
         std::vector<Base*> renderingChildren;
-        for (Base* definition : instancesByType(file, "IfcMaterialDefinitionRepresentation")) {
-            if (getEntityAttribute(definition, "RepresentedMaterial") != entity_) {
+
+        const auto collectSurfaceStyle = [&](Base* style) {
+            if (!isA(style, "IfcSurfaceStyle")) {
+                return;
+            }
+
+            surfaceStyles.push_back(style);
+
+            for (Base* rendering : aggregateToVector(
+                getEntityAggregate(style, "Styles"))) {
+
+                renderingStyles.push_back(rendering);
+
+                for (const std::string& attribute : {
+                    "SurfaceColour",
+                    "DiffuseColour",
+                    "TransmissionColour",
+                    "DiffuseTransmissionColour",
+                    "ReflectionColour",
+                    "SpecularColour",
+                    "SpecularHighlight"
+                }) {
+                    Base* child = getEntityAttribute(
+                        rendering,
+                        attribute);
+
+                    // Inline IFC values are not standalone entities.
+                    if (asEntity(child) != nullptr) {
+                        renderingChildren.push_back(child);
+                    }
+                }
+            }
+        };
+
+        for (Base* definition : instancesByType(
+            file,
+            "IfcMaterialDefinitionRepresentation")) {
+
+            if (getEntityAttribute(
+                definition,
+                "RepresentedMaterial") != entity_) {
                 continue;
             }
+
             definitionRepresentations.push_back(definition);
-            for (Base* representation : aggregateToVector(getEntityAggregate(definition, "Representations"))) {
+
+            for (Base* representation : aggregateToVector(
+                getEntityAggregate(
+                    definition,
+                    "Representations"))) {
+
                 representations.push_back(representation);
-                for (Base* item : aggregateToVector(getEntityAggregate(representation, "Items"))) {
+
+                for (Base* item : aggregateToVector(
+                    getEntityAggregate(
+                        representation,
+                        "Items"))) {
+
                     styledItems.push_back(item);
-                    for (Base* style : aggregateToVector(getEntityAggregate(item, "Styles"))) {
+
+                    for (Base* style : aggregateToVector(
+                        getEntityAggregate(item, "Styles"))) {
+
                         if (isA(style, "IfcSurfaceStyle")) {
-                            surfaceStyles.push_back(style);
-                            for (Base* rendering : aggregateToVector(getEntityAggregate(style, "Styles"))) {
-                                renderingStyles.push_back(rendering);
-                                for (const std::string& attribute : {
-                                         "SurfaceColour",
-                                         "DiffuseColour",
-                                         "TransmissionColour",
-                                         "DiffuseTransmissionColour",
-                                         "ReflectionColour",
-                                         "SpecularColour",
-                                         "SpecularHighlight"}) {
-                                    Base* child = getEntityAttribute(rendering, attribute);
-                                    if (child != nullptr) {
-                                        renderingChildren.push_back(child);
-                                    }
-                                }
+                            collectSurfaceStyle(style);
+
+                        } else if (isA(
+                            style,
+                            "IfcPresentationStyleAssignment")) {
+
+                            presentationStyleAssignments.push_back(
+                                style);
+
+                            for (Base* nestedStyle : aggregateToVector(
+                                getEntityAggregate(
+                                    style,
+                                    "Styles"))) {
+
+                                collectSurfaceStyle(nestedStyle);
                             }
                         }
                     }
@@ -655,15 +718,67 @@ public:
             }
         }
 
+        // Collect style assignments left unreferenced after removing
+        // the material's visual assignments from representation items.
+        for (Base* assignment : instancesByType(
+            file,
+            "IfcPresentationStyleAssignment")) {
+
+            for (Base* style : aggregateToVector(
+                getEntityAggregate(assignment, "Styles"))) {
+
+                if (std::find(
+                    surfaceStyles.begin(),
+                    surfaceStyles.end(),
+                    style) != surfaceStyles.end()) {
+
+                    presentationStyleAssignments.push_back(
+                        assignment);
+
+                    break;
+                }
+            }
+        }
+
         file.removeEntity(entity_);
-        removeUniqueIfUnreferenced(file, propertyContainers);
-        removeUniqueIfUnreferenced(file, propertyEntities);
-        removeUniqueIfUnreferenced(file, definitionRepresentations);
-        removeUniqueIfUnreferenced(file, representations);
-        removeUniqueIfUnreferenced(file, styledItems);
-        removeUniqueIfUnreferenced(file, surfaceStyles);
-        removeUniqueIfUnreferenced(file, renderingStyles);
-        removeUniqueIfUnreferenced(file, renderingChildren);
+
+        // Remove material properties in dependency order.
+        removeUniqueIfUnreferenced(
+            file,
+            propertyContainers);
+
+        removeUniqueIfUnreferenced(
+            file,
+            propertyEntities);
+
+        // Remove visual entities from owners to dependencies.
+        removeUniqueIfUnreferenced(
+            file,
+            definitionRepresentations);
+
+        removeUniqueIfUnreferenced(
+            file,
+            representations);
+
+        removeUniqueIfUnreferenced(
+            file,
+            styledItems);
+
+        removeUniqueIfUnreferenced(
+            file,
+            presentationStyleAssignments);
+
+        removeUniqueIfUnreferenced(
+            file,
+            surfaceStyles);
+
+        removeUniqueIfUnreferenced(
+            file,
+            renderingStyles);
+
+        removeUniqueIfUnreferenced(
+            file,
+            renderingChildren);
     }
 
 private:
