@@ -263,7 +263,7 @@ Reference validation performed on November 24, 2026:
 | Metric | Result |
 | --- | ---: |
 | Test suites | 24 / 24 |
-| Tests | 375 / 375 |
+| Tests | 376 / 376 |
 | Failures | 0 |
 | Errors | 0 |
 | Skipped tests | 0 |
