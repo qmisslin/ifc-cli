@@ -88,3 +88,4 @@ samples/
 /tests/reports/
 __pycache__/
 *.pyc
+/tests/.venv/

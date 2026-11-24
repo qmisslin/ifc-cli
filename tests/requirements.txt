@@ -1,0 +1,3 @@
+ifcopenshell
+networkx>=3.2
+psutil

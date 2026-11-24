@@ -2839,9 +2839,21 @@ class PersistenceTests(unittest.TestCase):
         ]
 
         expected = {
-            item["globalId"]: self.persistent_transform(item)
+            item["globalId"]: self.persistent_transform(
+                self.get_transform(item["id"])
+            )
             for item in hierarchy
         }
+
+        self.assertEqual(
+            expected[grandchild["globalId"]]["geometryCount"],
+            1
+        )
+
+        self.assertEqual(
+            expected[grandchild["globalId"]]["geometryKinds"],
+            Counter({"DOMAIN": 1})
+        )
 
         domain_before = self.tessellate_domain(
             domain,
