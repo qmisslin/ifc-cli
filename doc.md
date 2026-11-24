@@ -204,6 +204,69 @@ name, transform, profile, depth, operation
 
 Native IFC geometries may be returned with `editable:false`. Such geometries cannot be updated.
 
+### Geometry kinds
+
+Every geometry exposes a `kind` field:
+
+| Kind | Description |
+| --- | --- |
+| `SOLID` | Physical geometry or physical geometry operation |
+| `DOMAIN` | Non-physical spatial or simulation volume |
+
+`geometryCreate` accepts an optional `kind` field.
+The default value is `SOLID`.
+
+A domain is an independent closed polygonal extrusion.
+It does not add or subtract physical matter.
+
+Domains created by the API use:
+
+- `IfcSpatialZone`
+- `IfcExtrudedAreaSolid`
+- `IfcRelAssignsToProduct`
+
+Creating a domain requires IFC4 or later and a parent product
+with a valid local placement.
+
+Domains support the standard geometry inspection, update,
+deletion and duplication operations.
+
+Only the `ADD` operation is supported for domains.
+The geometry kind cannot be changed after creation.
+
+Managed domains cannot receive physical materials.
+
+Native IFC spaces and spatial zones are classified as domains.
+Native geometry editability rules remain unchanged.
+
+### Geometry filtering
+
+`geometryGetAll` accepts an optional `kind` parameter:
+
+- `ALL`: return all geometries (default).
+- `SOLID`: return physical geometries.
+- `DOMAIN`: return spatial and simulation domains.
+
+### Tessellation filtering
+
+`transformTessellate` accepts an optional `options.kind`:
+
+- `SOLID`: tessellate physical geometries (default).
+- `DOMAIN`: tessellate spatial and simulation volumes.
+
+Domain tessellation supports an optional `options.geometryId`
+to select one managed domain in the requested transform hierarchy.
+
+Domains are never included in physical mesh results.
+
+Both kinds use the existing JSONL mesh event protocol.
+
+Geometry profiles, extrusion depths and placement matrices
+use IFC model units. Tessellated vertices use metres.
+
+Domain meshes represent closed volume boundaries, not
+physical surfaces or occupied material.
+
 ---
 
 ## Materials

@@ -22,7 +22,9 @@ Le programme n’a pas vocation à devenir un éditeur IFC complet. Il fournit u
 * l’ajout de matière à un élément existant ;
 * la soustraction de matière à un élément existant ;
 * la création et l’affectation de matériaux simples ;
-* la tessellation des éléments pour leur visualisation.
+* la création et la modification de domaines spatiaux non physiques ;
+* la séparation des géométries physiques et des domaines de simulation ;
+* la tessellation indépendante des géométries physiques et des domaines pour leur visualisation ou leur exploitation dans un moteur de simulation.
 
 Les géométries créées par l’API sont limitées à des profils polygonaux 2D extrudés.
 
@@ -70,7 +72,15 @@ Les géométries représentent :
 
 * les éléments géométriques existants du fichier IFC ;
 * les opérations additives créées par l’API ;
-* les opérations soustractives créées par l’API.
+* les opérations soustractives créées par l’API ;
+* les domaines spatiaux natifs du fichier IFC ;
+* les domaines de simulation non physiques créés par l’API.
+
+Chaque géométrie possède une catégorie `kind` permettant de distinguer
+les géométries physiques (`SOLID`) des domaines spatiaux (`DOMAIN`).
+
+Les deux catégories utilisent le même index de géométries et le même
+espace d’identifiants de session.
 
 ### 3.3 Matériaux
 
@@ -331,6 +341,13 @@ Exemples :
 * `""` est invalide lorsqu’une chaîne non vide est attendue ;
 * `null` est invalide sauf lorsque cette valeur est explicitement autorisée.
 
+Les champs facultatifs peuvent posséder une valeur par défaut uniquement
+lorsque cette valeur est explicitement définie dans la spécification de
+la commande.
+
+L’absence d’un champ facultatif ne doit pas être confondue avec la
+présence d’une valeur `null`.
+
 Les nombres doivent être finis.
 
 Les valeurs suivantes sont interdites :
@@ -344,7 +361,7 @@ Infinity
 Le programme ne doit jamais :
 
 * corriger automatiquement une requête ;
-* compléter automatiquement un paramètre manquant ;
+* compléter automatiquement un paramètre obligatoire manquant ;
 * ignorer silencieusement un champ inconnu ;
 * normaliser un nom de commande ;
 * convertir implicitement une valeur ;
@@ -417,6 +434,11 @@ Un transform peut posséder plusieurs relations parentes indépendantes :
 * parent de décomposition.
 
 Ces relations ne doivent pas être fusionnées dans un unique `parentId`.
+
+Les domaines créés par l’API sont associés à un transform parent,
+mais ne constituent pas eux-mêmes des transforms indexés.
+
+Les espaces et zones spatiales IFC natifs restent indexés comme transforms.
 
 ### 6.2 Parents
 
@@ -562,7 +584,8 @@ Les transforms créés par l’API peuvent recevoir :
 * un parent de placement ;
 * un parent de décomposition ;
 * des propriétés ;
-* des géométries extrudées ;
+* des géométries physiques extrudées ;
+* des domaines spatiaux extrudés ;
 * des matériaux simples.
 
 ### 6.7 Structure retournée
@@ -619,6 +642,12 @@ Il ne doit pas contenir une sérialisation récursive complète du graphe IFC.
 Les références vers d’autres entités exposées doivent utiliser des identifiants de session.
 
 ---
+
+Le tableau `geometries` contient les identifiants des géométries
+physiques et des domaines associés au transform.
+
+La catégorie de chaque géométrie peut être obtenue avec `geometryGet`
+ou filtrée avec `geometryGetAll`.
 
 ## 7. Propriétés
 
@@ -756,6 +785,7 @@ Une géométrie IFC native peut être représentée par :
   "source": "ifc",
   "editable": false,
   "ifcClass": "IfcMappedItem",
+  "kind": "SOLID",
   "operation": "BASE",
   "parentId": "transform:42",
   "definition": {}
@@ -768,20 +798,54 @@ Le champ `editable` indique si `geometryUpdate` est autorisé.
 
 Une géométrie native peut néanmoins être supprimée avec `geometryDelete`.
 
+Les éléments de représentation natifs associés à un `IfcSpace`
+ou à un `IfcSpatialZone` sont classés comme `DOMAIN`.
+
+Les autres éléments de représentation natifs sont classés comme `SOLID`.
+
+Cette classification ne modifie pas les règles d’éditabilité des
+géométries natives.
+
+Les termes `SOLID` et `DOMAIN` décrivent la fonction de la géométrie
+dans la scène et non sa classe géométrique IFC.
+
+Une géométrie native classée `SOLID` n’est donc pas nécessairement
+un volume mathématique fermé.
+
 ### 8.2 Géométries créées par l’API
 
-Les géométries créées par l’API sont des opérations géométriques simples basées sur l’extrusion d’un profil polygonal.
+Les géométries créées par l’API sont basées sur l’extrusion
+d’un profil polygonal.
 
-Deux opérations sont prises en charge :
+Deux catégories sont prises en charge :
 
-* `ADD` : ajout de matière ;
-* `SUBTRACT` : soustraction de matière.
+| Catégorie | Description |
+| --------- | ----------- |
+| `SOLID` | Géométrie physique ou opération géométrique physique. |
+| `DOMAIN` | Volume spatial non physique. |
 
-Chaque opération créée par l’API est associée à un transform cible.
+La catégorie est définie par le champ `kind`.
+
+La catégorie d’une géométrie ne peut pas être modifiée après sa création.
+
+Les opérations autorisées dépendent de cette catégorie :
+
+| Catégorie | Opération | Description |
+| --------- | --------- | ----------- |
+| `SOLID` | `ADD` | Ajout de matière. |
+| `SOLID` | `SUBTRACT` | Soustraction de matière. |
+| `DOMAIN` | `ADD` | Création d’un volume spatial indépendant. |
+
+L’opération `BASE` est réservée aux géométries natives.
+
+Chaque géométrie créée par l’API est associée à un transform cible.
+
+Les domaines et les géométries physiques utilisent les mêmes structures
+de profil, de profondeur et de placement.
 
 ### 8.3 Ajout de matière
 
-Une opération `ADD` est représentée dans le modèle IFC par :
+Une opération `ADD` de catégorie `SOLID` est représentée dans le modèle IFC par :
 
 ```text
 IfcProjectionElement
@@ -795,7 +859,7 @@ La représentation géométrique originale du transform cible n’est pas modifi
 
 ### 8.4 Soustraction de matière
 
-Une opération `SUBTRACT` est représentée dans le modèle IFC par :
+Une opération `SUBTRACT` de catégorie `SOLID` est représentée dans le modèle IFC par :
 
 ```text
 IfcOpeningElement
@@ -820,7 +884,22 @@ L’API retourne une erreur si :
 * le placement demandé ne peut pas être représenté ;
 * la profondeur d’extrusion est invalide.
 
-Les opérations créées par l’API sont éditables.
+La création d’un domaine nécessite :
+
+* un schéma IFC prenant en charge `IfcSpatialZone` ;
+* un transform parent correspondant à un `IfcProduct` ;
+* un parent possédant un `IfcLocalPlacement` ;
+* un profil polygonal valide ;
+* une profondeur strictement positive ;
+* une opération `ADD`.
+
+Les schémas IFC2X3 ne permettent pas la création de domaines
+gérés par cette API.
+
+Une opération `SUBTRACT` appliquée à un domaine doit être refusée
+avec `INVALID_PARAMETERS`.
+
+Les géométries créées par l’API, y compris les domaines, sont éditables.
 
 Les géométries natives existantes sont en lecture seule pour `geometryUpdate`, sauf prise en charge explicite ultérieure.
 
@@ -889,6 +968,7 @@ Une géométrie éditable retournée par l’API utilise la structure suivante :
   "source": "editor",
   "editable": true,
   "ifcClass": "IfcOpeningElement",
+  "kind": "SOLID",
   "parentId": "transform:42",
   "name": "Opening 01",
   "operation": "SUBTRACT",
@@ -921,6 +1001,140 @@ Une géométrie éditable retournée par l’API utilise la structure suivante :
   "definition": {}
 }
 ```
+
+---
+
+### 8.8 Domaines spatiaux non physiques
+
+Un domaine représente un volume fermé délimitant une région de l’espace.
+
+Il peut notamment représenter :
+
+* un espace fonctionnel ;
+* une zone d’analyse ;
+* un domaine de simulation physique ;
+* une enveloppe de discrétisation voxel ;
+* une région spatiale utilisée par une application externe.
+
+Un domaine ne représente pas de matière physique.
+
+Il ne doit pas participer aux opérations additives ou soustractives
+appliquées aux géométries physiques.
+
+Il peut être superposé à d’autres domaines ou à des géométries physiques.
+
+L’intersection de plusieurs domaines ne provoque aucune fusion
+géométrique automatique.
+
+Un domaine est défini par :
+
+* un identifiant de session ;
+* un transform parent ;
+* un nom ;
+* un placement ;
+* un profil polygonal ;
+* une profondeur d’extrusion.
+
+Les règles de validation des profils et des placements sont identiques
+à celles des géométries physiques extrudées.
+
+### 8.9 Représentation IFC des domaines
+
+Un domaine créé par l’API utilise les entités suivantes :
+
+```text
+IfcSpatialZone
+IfcRelAssignsToProduct
+IfcExtrudedAreaSolid
+```
+
+L’entité `IfcSpatialZone` possède :
+
+* un `GlobalId` ;
+* un `Name` ;
+* un `ObjectType` égal à `ifc-cli:domain` ;
+* un `ObjectPlacement` de type `IfcLocalPlacement` ;
+* une représentation géométrique de type `SweptSolid` ;
+* un `PredefinedType` égal à `USERDEFINED`, lorsque cet attribut existe.
+
+La relation `IfcRelAssignsToProduct` possède :
+
+* un `Name` égal à `ifc-cli:domain-parent` ;
+* un `RelatingProduct` référençant le transform parent ;
+* un tableau `RelatedObjects` contenant le domaine.
+
+Ces marqueurs permettent de distinguer les domaines gérés par l’API
+des zones spatiales natives du fichier IFC.
+
+Le domaine possède sa propre représentation géométrique.
+
+La représentation du transform parent n’est pas modifiée.
+
+La géométrie du domaine reste mathématiquement fermée même si
+elle ne représente pas de matière.
+
+### 8.10 Persistance et cycle de vie des domaines
+
+Les domaines sont directement stockés dans le modèle IFC.
+
+Aucun fichier externe ni index persistant supplémentaire n’est nécessaire.
+
+Lors du chargement :
+
+* les zones créées par l’API sont identifiées par leur classe IFC
+  et leur attribut `ObjectType` ;
+* leur transform parent est retrouvé via la relation
+  `IfcRelAssignsToProduct` dédiée ;
+* elles sont indexées comme géométries éditables de catégorie `DOMAIN` ;
+* elles ne sont pas ajoutées à l’index des transforms.
+
+Un domaine géré ne possédant pas de parent valide doit provoquer
+une erreur explicite lors du chargement.
+
+Les domaines utilisent les commandes existantes :
+
+* `geometryCreate` ;
+* `geometryGet` ;
+* `geometryGetAll` ;
+* `geometryUpdate` ;
+* `geometryDelete`.
+
+Leur catégorie et leur définition géométrique doivent être conservées
+après une sauvegarde et un nouveau chargement du fichier IFC.
+
+La duplication d’un transform duplique également ses domaines gérés,
+avec de nouveaux identifiants de session et de nouveaux `GlobalId`.
+
+Une modification du placement du transform parent doit conserver
+le placement relatif de ses domaines.
+
+La suppression d’un transform entraîne la suppression de ses domaines.
+
+### 8.11 Tessellation des domaines
+
+La tessellation des domaines est indépendante de celle des
+géométries physiques.
+
+Le maillage d’un domaine représente la frontière triangulée du volume.
+
+Cette frontière doit permettre à une application cliente de déterminer
+les régions intérieures et extérieures du domaine.
+
+Les domaines polygonaux extrudés créés par l’API doivent produire
+des maillages fermés.
+
+Cette garantie ne s’étend pas aux représentations spatiales natives
+arbitraires provenant d’un fichier IFC externe.
+
+La tessellation ne réalise aucune discrétisation voxel.
+
+La génération des voxels, la classification de la matière et les
+calculs physiques relèvent de l’application cliente.
+
+Les maillages de plusieurs domaines peuvent être concaténés dans
+une même réponse de tessellation.
+
+Cette concaténation ne constitue pas une union booléenne.
 
 ---
 
@@ -984,6 +1198,11 @@ Le programme doit gérer en interne la distinction entre :
 * le style visuel utilisé pour le rendu.
 
 L’API expose ces deux concepts sous une abstraction unique de matériau simple.
+
+Un domaine créé et géré par l’API ne peut pas recevoir de matériau physique.
+
+Les éventuelles données de matériaux présentes dans les espaces
+et zones spatiales IFC natifs ne sont pas automatiquement supprimées.
 
 ### 9.4 Structure retournée
 
@@ -1050,6 +1269,7 @@ La suppression d’un transform entraîne :
 * la suppression de ses géométries ;
 * la suppression de ses opérations additives ;
 * la suppression de ses opérations soustractives ;
+* la suppression de ses domaines ;
 * la suppression de ses relations spatiales ;
 * la suppression de ses relations de placement ;
 * la suppression de ses relations de décomposition ;
@@ -1081,7 +1301,7 @@ La suppression d’une géométrie entraîne :
 * la suppression de ses affectations de matériaux ;
 * la suppression de toutes les références vers cette géométrie.
 
-Pour une opération `ADD`, le programme supprime notamment :
+Pour une opération `ADD` de catégorie `SOLID`, le programme supprime notamment :
 
 ```text
 IfcRelProjectsElement
@@ -1089,13 +1309,26 @@ IfcProjectionElement
 IfcExtrudedAreaSolid
 ```
 
-Pour une opération `SUBTRACT`, le programme supprime notamment :
+Pour une opération `SUBTRACT` de catégorie `SOLID`, le programme supprime notamment :
 
 ```text
 IfcRelVoidsElement
 IfcOpeningElement
 IfcExtrudedAreaSolid
 ```
+
+Pour un domaine créé par l’API, le programme supprime notamment :
+
+```text
+IfcRelAssignsToProduct
+IfcSpatialZone
+IfcExtrudedAreaSolid
+```
+
+Les entités exclusivement possédées par le domaine doivent être nettoyées.
+
+La suppression d’un domaine ne doit pas supprimer son transform parent
+ni modifier les géométries physiques associées à ce dernier.
 
 Si une géométrie native est supprimée, le programme supprime également son rattachement à la représentation du produit.
 
@@ -1264,6 +1497,27 @@ Un objet vide ne constitue pas une mise à jour valide.
 
 ---
 
+### 11.9 `GeometryKind`
+
+Le type `GeometryKind` est une chaîne sensible à la casse.
+
+Valeurs autorisées :
+
+```text
+SOLID
+DOMAIN
+```
+
+Les commandes de filtrage peuvent également accepter la valeur `ALL`
+lorsque leur spécification l’autorise explicitement.
+
+`ALL` est une valeur de filtre et non une catégorie de géométrie.
+
+Les valeurs `solid`, `domain`, `all`, les nombres et `null`
+ne sont pas acceptés.
+
+---
+
 ## 12. Commandes disponibles
 
 Les noms de commandes définis dans cette section sont les seuls noms autorisés.
@@ -1335,11 +1589,21 @@ Résultat :
   "supportedGeometryOperations": [
     "ADD",
     "SUBTRACT"
+  ],
+  "supportedGeometryKinds": [
+    "SOLID",
+    "DOMAIN"
   ]
 }
 ```
 
 Les valeurs retournées doivent correspondre aux capacités réellement compilées.
+
+Le champ `supportedGeometryKinds` indique les catégories reconnues
+par l’API.
+
+La création effective d’un domaine dépend également du schéma IFC
+du modèle chargé et de la compatibilité du transform parent.
 
 Cette commande ne nécessite pas qu’un modèle soit chargé.
 
@@ -1370,6 +1634,11 @@ Résultat :
   "materialCount": 12
 }
 ```
+
+Le champ `geometryCount` comptabilise les géométries physiques
+et les domaines indexés.
+
+Le champ `transformCount` n’inclut pas les domaines gérés par l’API.
 
 Le chargement invalide tous les identifiants de session précédents.
 
@@ -1563,9 +1832,55 @@ Résultat :
 
 L’identifiant retourné n’est plus valide après la réponse.
 
+#### ROUTE API : `transformDuplicate`
+
+Duplique un transform et ses géométries associées.
+
+Paramètres exacts :
+
+```json
+{
+  "id": "transform:42",
+  "includeChildren": true
+}
+```
+
+| Paramètre | Type | Description |
+| --------- | ---- | ----------- |
+| `id` | identifiant de transform | Transform à dupliquer. |
+| `includeChildren` | booléen | Inclut les transforms enfants. |
+
+Les deux champs sont obligatoires.
+
+Les géométries éditables dupliquées conservent leur catégorie `kind`,
+leur opération, leur nom, leur profil, leur profondeur et leur
+placement relatif.
+
+Les domaines dupliqués restent indépendants des géométries physiques.
+
+Résultat :
+
+```json
+{
+  "rootId": "transform:100",
+  "transforms": {
+    "transform:42": "transform:100"
+  },
+  "geometries": {
+    "geometry:17": "geometry:101"
+  }
+}
+```
+
+Les objets `transforms` et `geometries` associent les identifiants
+des entités sources aux identifiants de leurs copies.
+
+Les entités sources restent valides et inchangées.
+
 #### ROUTE API : `transformTessellate`
 
-Tesselle la géométrie finale d’un transform.
+Tesselle les géométries physiques ou les domaines spatiaux
+associés à un transform.
 
 Paramètres exacts :
 
@@ -1576,7 +1891,8 @@ Paramètres exacts :
     "space": "world",
     "includeNormals": true,
     "includeMaterials": true,
-    "includeChildren": false
+    "includeChildren": false,
+    "kind": "SOLID"
   }
 }
 ```
@@ -1589,7 +1905,71 @@ Paramètres exacts :
 | `options.includeMaterials` | booléen                  | Inclut les groupes de matériaux. |
 | `options.includeChildren`  | booléen                  | Inclut les transforms enfants.   |
 
-L’objet `options` et ses quatre champs sont obligatoires.
+| `options.kind` | `GeometryKind` | Catégorie à tesseller. Facultatif, `SOLID` par défaut. |
+| `options.geometryId` | identifiant de géométrie | Domaine géré à tesseller individuellement. Facultatif. |
+
+L’objet `options` est obligatoire.
+
+Les champs `space`, `includeNormals`, `includeMaterials` et
+`includeChildren` sont obligatoires.
+
+Les champs `kind` et `geometryId` sont facultatifs.
+
+Lorsque `kind` est absent, sa valeur par défaut est `SOLID`.
+
+Comportement selon la catégorie :
+
+* `SOLID` : tesselle les produits physiques sélectionnés et exclut
+  les produits de type `IfcSpace` ou `IfcSpatialZone`, ainsi que
+  les domaines gérés par l’API ;
+* `DOMAIN` : tesselle les espaces, zones spatiales et domaines
+  gérés appartenant à la sélection.
+
+La valeur `ALL` n’est pas autorisée pour cette commande.
+
+Lorsque `includeChildren` vaut `true`, les transforms descendants
+sont également pris en compte dans la sélection.
+
+Le champ `geometryId` est autorisé uniquement avec `kind: DOMAIN`.
+
+Il doit référencer un domaine créé et géré par l’API, appartenant
+au transform demandé ou à un descendant inclus dans la sélection.
+
+Exemple de tessellation d’un domaine individuel :
+
+```json
+{
+  "id": "transform:42",
+  "options": {
+    "space": "world",
+    "includeNormals": true,
+    "includeMaterials": false,
+    "includeChildren": false,
+    "kind": "DOMAIN",
+    "geometryId": "geometry:17"
+  }
+}
+```
+
+Lorsque `space` vaut `local`, les sommets sont exprimés dans
+le repère local du transform demandé, et non dans celui du domaine.
+
+Lorsque `space` vaut `world`, les sommets sont exprimés dans
+le repère mondial.
+
+Les profils, profondeurs et translations des matrices de placement
+utilisent les unités du modèle IFC.
+
+Les sommets tessellés utilisent les mètres.
+
+Les translations utilisées pour convertir les sommets vers le repère
+local doivent tenir compte du facteur d’unité du modèle IFC.
+
+Une sélection ne contenant aucune géométrie tessellable doit produire
+un maillage vide avec `vertexCount: 0` et `indexCount: 0`.
+
+Si un domaine géré sélectionné ne peut pas produire de triangles,
+la commande doit retourner `TESSELLATION_FAILED`.
 
 Les seuls événements autorisés sont :
 
@@ -1705,17 +2085,26 @@ Fin du maillage :
 
 `mesh.materials` est omis lorsque `includeMaterials` vaut `false`.
 
+Pour une tessellation de catégorie `DOMAIN`, lorsque
+`includeMaterials` vaut `true`, l’événement `mesh.materials`
+contient un tableau `groups` vide.
+
+Pour un maillage vide, aucun bloc de sommets, d’indices ou
+de normales n’est émis.
+
 ### 12.3 Commandes de géométries
 
 #### ROUTE API : `geometryGetAll`
 
-Retourne toutes les géométries ou uniquement celles d’un transform donné.
+Retourne les géométries de la scène ou celles d’un transform donné,
+avec un filtre facultatif sur leur catégorie.
 
 Paramètres exacts :
 
 ```json
 {
-  "transformId": null
+  "transformId": null,
+  "kind": "ALL"
 }
 ```
 
@@ -1723,9 +2112,25 @@ Paramètres exacts :
 | ------------- | ---------------------------------- | --------------------- |
 | `transformId` | identifiant de transform ou `null` | Filtre par transform. |
 
+| `kind` | chaîne | Filtre facultatif : `ALL`, `SOLID` ou `DOMAIN`. |
+
 Le champ `transformId` est obligatoire.
 
-La valeur `null` retourne toutes les géométries.
+La valeur `null` désactive le filtre par transform.
+
+Le champ `kind` est facultatif.
+
+Lorsque ce champ est absent, sa valeur par défaut est `ALL`.
+
+Les valeurs possibles sont :
+
+* `ALL` : toutes les catégories ;
+* `SOLID` : uniquement les géométries physiques ;
+* `DOMAIN` : uniquement les domaines spatiaux.
+
+Les deux filtres sont cumulatifs.
+
+Le résultat contient le champ `kind` pour chaque géométrie.
 
 Résultat :
 
@@ -1738,6 +2143,7 @@ Résultat :
     "parentId": "transform:42",
     "source": "ifc",
     "editable": false,
+    "kind": "SOLID",
     "operation": "BASE"
   }
 ]
@@ -1761,7 +2167,7 @@ Paramètres exacts :
 
 #### ROUTE API : `geometryCreate`
 
-Crée une opération géométrique polygonale extrudée.
+Crée une géométrie physique ou un domaine polygonal extrudé.
 
 Paramètres exacts :
 
@@ -1769,6 +2175,7 @@ Paramètres exacts :
 {
   "parentId": "transform:42",
   "name": "Opening 01",
+  "kind": "SOLID",
   "transform": {
     "space": "parent",
     "matrix": [
@@ -1798,9 +2205,20 @@ Paramètres exacts :
 | `depth`     | nombre strictement positif | Profondeur sur l’axe local positif Z. |
 | `operation` | chaîne                     | `ADD` ou `SUBTRACT`.                  |
 
-Tous les champs sont obligatoires.
+| `kind` | `GeometryKind` | Catégorie facultative, `SOLID` par défaut. |
 
-Pour `ADD`, le programme crée :
+Tous les champs sont obligatoires sauf `kind`.
+
+Les combinaisons autorisées sont :
+
+* `SOLID` et `ADD` ;
+* `SOLID` et `SUBTRACT` ;
+* `DOMAIN` et `ADD`.
+
+La combinaison `DOMAIN` et `SUBTRACT` doit retourner
+`INVALID_PARAMETERS`.
+
+Pour `SOLID` avec `ADD`, le programme crée :
 
 ```text
 IfcProjectionElement
@@ -1808,7 +2226,7 @@ IfcRelProjectsElement
 IfcExtrudedAreaSolid
 ```
 
-Pour `SUBTRACT`, le programme crée :
+Pour `SOLID` avec `SUBTRACT`, le programme crée :
 
 ```text
 IfcOpeningElement
@@ -1816,7 +2234,43 @@ IfcRelVoidsElement
 IfcExtrudedAreaSolid
 ```
 
-Le résultat est la structure complète de la géométrie créée.
+Pour `DOMAIN` avec `ADD`, le programme crée :
+
+```text
+IfcSpatialZone
+IfcRelAssignsToProduct
+IfcExtrudedAreaSolid
+```
+
+Exemple de création d’un domaine :
+
+```json
+{
+  "parentId": "transform:42",
+  "name": "Simulation domain",
+  "kind": "DOMAIN",
+  "transform": {
+    "space": "parent",
+    "matrix": [
+      1, 0, 0, 0,
+      0, 1, 0, 0,
+      0, 0, 1, 0,
+      0, 0, 0, 1
+    ]
+  },
+  "profile": [
+    [0, 0],
+    [5, 0],
+    [5, 3],
+    [0, 3]
+  ],
+  "depth": 2,
+  "operation": "ADD"
+}
+```
+
+Le résultat est la structure complète de la géométrie créée,
+incluant sa catégorie `kind`.
 
 #### ROUTE API : `geometryUpdate`
 
@@ -1859,13 +2313,28 @@ Paramètres :
 
 Au moins un champ parmi `name`, `transform`, `profile`, `depth` et `operation` doit être présent.
 
-Une modification de `operation` entraîne la suppression de la relation IFC précédente et la création de la relation correspondant à la nouvelle opération.
+Pour une géométrie éditable de catégorie `SOLID`, un changement
+de valeur de `operation` entraîne la suppression de la relation IFC
+précédente et la création de la relation correspondant à la nouvelle
+opération.
+
+Pour une géométrie de catégorie `DOMAIN`, seule la valeur `ADD`
+est autorisée pour le champ `operation`.
+
+Les champs `name`, `transform`, `profile` et `depth` peuvent être
+modifiés pour les deux catégories, lorsque la géométrie est éditable.
+
+Le champ `kind` ne peut pas être fourni à `geometryUpdate`.
+
+Une modification de catégorie nécessite la suppression de la géométrie
+et la création d’une nouvelle géométrie.
 
 Le résultat est la structure complète de la géométrie après modification.
 
 #### ROUTE API : `geometryDelete`
 
-Supprime une géométrie et toutes les références correspondantes.
+Supprime une géométrie physique ou un domaine ainsi que
+les références correspondantes.
 
 Paramètres exacts :
 
@@ -2044,6 +2513,9 @@ Résultat :
 
 Une affectation déjà existante doit être considérée comme un succès sans créer de relation dupliquée.
 
+Une tentative d’affectation à un domaine créé et géré par l’API
+doit retourner `INVALID_RELATION`.
+
 #### ROUTE API : `materialUnassign`
 
 Supprime une affectation précise entre un matériau et une cible.
@@ -2113,6 +2585,15 @@ Le champ `command` ne correspond pas exactement à une commande autorisée.
 
 Les paramètres sont absents, incomplets, supplémentaires ou utilisent un type invalide.
 
+Cette erreur couvre également :
+
+* une catégorie `kind` inconnue ;
+* une valeur de filtre non autorisée pour la commande ;
+* une opération `SUBTRACT` appliquée à un domaine éditable ;
+* la présence de `kind` dans `geometryUpdate` ;
+* une sélection `geometryId` incompatible avec la catégorie
+  de tessellation ou la hiérarchie demandée.
+
 ### 13.4 `NO_MODEL_LOADED`
 
 La commande nécessite une scène IFC mais aucun modèle n’est chargé.
@@ -2156,6 +2637,9 @@ La géométrie existe mais ne peut pas être modifiée par `geometryUpdate`.
 ### 13.14 `GEOMETRY_OPERATION_NOT_SUPPORTED`
 
 L’opération géométrique demandée n’est pas compatible avec la cible ou le schéma.
+
+Cette erreur couvre notamment la création d’un domaine lorsque
+le schéma IFC ne prend pas en charge les entités nécessaires.
 
 ### 13.15 `INVALID_PROFILE`
 
@@ -2443,6 +2927,7 @@ save
 transformGetAll
 transformGet
 transformCreate
+transformDuplicate
 transformUpdate
 transformDelete
 transformTessellate
@@ -2492,7 +2977,12 @@ Cela comprend notamment :
 * l’affectation d’un matériau ;
 * la suppression d’un matériau et de ses affectations ;
 * la résolution des transforms mondiaux ;
-* la tessellation finale ;
+* la tessellation finale des géométries physiques ;
+* la tessellation indépendante des domaines ;
+* le filtrage des géométries selon leur catégorie ;
+* l’indexation et la reconstruction des domaines lors du chargement ;
+* la duplication des domaines ;
+* la conservation des placements relatifs lors du déplacement des parents ;
 * le nettoyage des objets IFC orphelins ;
 * la mise à jour des index après une modification.
 
@@ -2556,7 +3046,8 @@ Une instance de `Geometry` représente :
 
 * une géométrie IFC native indexée ;
 * une opération additive créée par l’API ;
-* une opération soustractive créée par l’API.
+* une opération soustractive créée par l’API ;
+* un domaine spatial non physique créé par l’API.
 
 Elle stocke ou permet de retrouver :
 
@@ -2566,6 +3057,7 @@ Elle stocke ou permet de retrouver :
 * son type IFC ;
 * sa source `ifc` ou `editor` ;
 * son caractère éditable ;
+* sa catégorie `SOLID` ou `DOMAIN` ;
 * son opération `BASE`, `ADD` ou `SUBTRACT` ;
 * son profil éventuel ;
 * sa profondeur éventuelle ;
@@ -2580,6 +3072,9 @@ La classe `Geometry` est responsable de :
 * créer un `IfcExtrudedAreaSolid` ;
 * créer une opération `ADD` ;
 * créer une opération `SUBTRACT` ;
+* créer un domaine spatial indépendant ;
+* identifier les domaines gérés à partir des attributs IFC ;
+* identifier la relation IFC associant un domaine à son parent ;
 * modifier une opération créée par l’API ;
 * remplacer le profil d’une extrusion ;
 * remplacer la profondeur d’une extrusion ;
@@ -2588,7 +3083,7 @@ La classe `Geometry` est responsable de :
 * convertir une opération `SUBTRACT` en `ADD` ;
 * fournir les entités nécessaires à la tessellation.
 
-Une opération `ADD` utilise exclusivement :
+Une opération `ADD` de catégorie `SOLID` utilise exclusivement :
 
 ```text
 IfcProjectionElement
@@ -2596,13 +3091,24 @@ IfcRelProjectsElement
 IfcExtrudedAreaSolid
 ```
 
-Une opération `SUBTRACT` utilise exclusivement :
+Une opération `SUBTRACT` de catégorie `SOLID` utilise exclusivement :
 
 ```text
 IfcOpeningElement
 IfcRelVoidsElement
 IfcExtrudedAreaSolid
 ```
+
+Un domaine créé par l’API utilise :
+
+```text
+IfcSpatialZone
+IfcRelAssignsToProduct
+IfcExtrudedAreaSolid
+```
+
+La catégorie est déterminée à partir des entités IFC référencées
+et des marqueurs persistants définis dans la section 8.9.
 
 La classe `Geometry` ne doit pas :
 
@@ -2759,8 +3265,8 @@ Lorsqu’une donnée obligatoire est absente ou invalide, la commande doit écho
 9. Les géométries créées par l’API utilisent exclusivement des profils polygonaux extrudés.
 10. L’extrusion est toujours réalisée selon l’axe local positif Z.
 11. La position et la direction de l’extrusion sont déterminées par le transform de la géométrie.
-12. Les ajouts utilisent `IfcProjectionElement`.
-13. Les soustractions utilisent `IfcOpeningElement`.
+12. Les ajouts de matière utilisent `IfcProjectionElement`.
+13. Les soustractions de matière utilisent `IfcOpeningElement`.
 14. Lorsqu’un tableau de propriétés est fourni, il remplace intégralement les propriétés éditables existantes.
 15. Une propriété éditable absente du nouveau tableau est supprimée du graphe IFC.
 16. Les propriétés non éditables restent conservées dans `definition`.
@@ -2776,3 +3282,15 @@ Lorsqu’une donnée obligatoire est absente ou invalide, la commande doit écho
 26. Toutes les classes sont directement définies dans les fichiers `.hpp`.
 27. Aucun fichier source `.cpp` autre que `main.cpp` n’est utilisé.
 28. Aucun comportement implicite non documenté ne doit être ajouté.
+29. Toute géométrie possède une catégorie `SOLID` ou `DOMAIN`.
+30. Les domaines créés par l’API utilisent `IfcSpatialZone`.
+31. Les domaines ne représentent pas de matière physique.
+32. Les domaines ne participent pas aux opérations booléennes des géométries physiques.
+33. Les domaines gérés ne peuvent pas recevoir de matériau physique.
+34. La catégorie d’une géométrie ne peut pas être modifiée après sa création.
+35. Les géométries physiques et les domaines doivent pouvoir être listés et tessellés indépendamment.
+36. Les domaines créés par l’API doivent produire des maillages fermés.
+37. Les domaines doivent être conservés lors de la sauvegarde et du rechargement du fichier IFC.
+38. La duplication d’un transform conserve la catégorie de ses géométries.
+39. La suppression d’un transform entraîne la suppression de ses domaines.
+40. La discrétisation voxel relève exclusivement de l’application cliente.

@@ -14,6 +14,10 @@ It is built on top of [IfcOpenShell](https://ifcopenshell.org/) and is intended 
 * Read and update property sets
 * Tessellate IFC objects into triangle meshes
 * Communicate through JSON Lines over `stdin` and `stdout`
+* Create and edit non-physical polygonal simulation domains
+* Filter physical geometries and simulation domains independently
+* Tessellate physical geometries and simulation domains separately
+* Persist simulation domains in IFC4 spatial zones
 
 ## Requirements
 
