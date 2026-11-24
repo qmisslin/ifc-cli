@@ -77,15 +77,37 @@ inline std::string materialPropertiesAggregateAttribute(const Base* container) {
         json{{"ifcClass", container == nullptr ? json(nullptr) : json(container->declaration().name())}});
 }
 
-inline std::vector<Base*> materialPropertyContainers(IfcParse::IfcFile& file, Base* material) {
+inline std::vector<Base*> materialPropertyContainers(
+    IfcParse::IfcFile& file,
+    Base* material) {
+
     std::vector<Base*> result;
-    for (const std::string& className : {"IfcMaterialProperties", "IfcExtendedMaterialProperties"}) {
+    std::unordered_set<Base*> visited;
+
+    for (const std::string& className : {
+        "IfcMaterialProperties",
+        "IfcExtendedMaterialProperties"
+    }) {
         for (Base* container : instancesByType(file, className)) {
-            if (getEntityAttribute(container, "Material") == material) {
+            if (getEntityAttribute(container, "Material") != material) {
+                continue;
+            }
+
+            // Ignore native material property entities that do not
+            // expose a generic property aggregate.
+            if (!hasAttribute(container, "Properties") &&
+                !hasAttribute(container, "ExtendedProperties")) {
+                continue;
+            }
+
+            // IFC2X3 extended containers may be returned through
+            // both their base class and their concrete class.
+            if (visited.insert(container).second) {
                 result.push_back(container);
             }
         }
     }
+
     return result;
 }
 
@@ -103,17 +125,31 @@ inline Base* createMaterialPropertyContainer(
     Base* material,
     const std::string& name,
     const std::vector<Base*>& properties) {
-    const std::string className = schemaSupports(file, "IfcMaterialProperties") ?
-        "IfcMaterialProperties" : "IfcExtendedMaterialProperties";
+
+    // IFC2X3 requires IfcExtendedMaterialProperties.
+    // IFC4 and later use IfcMaterialProperties directly.
+    const std::string className =
+        schemaSupports(file, "IfcExtendedMaterialProperties")
+            ? "IfcExtendedMaterialProperties"
+            : "IfcMaterialProperties";
+
     Base* container = createInstance(file, className);
+
     setEntityAttribute(container, "Material", material);
+
     if (hasAttribute(container, "Name")) {
         setAttribute(container, "Name", name);
     }
+
     if (hasAttribute(container, "Description")) {
         unsetAttribute(container, "Description");
     }
-    setAttribute(container, materialPropertiesAggregateAttribute(container), makeAggregate(properties));
+
+    setAttribute(
+        container,
+        materialPropertiesAggregateAttribute(container),
+        makeAggregate(properties));
+
     return container;
 }
 

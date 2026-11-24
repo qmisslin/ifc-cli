@@ -49,6 +49,14 @@ public:
 
     json getCapabilities() const {
         std::vector<std::string> schemas = IfcParse::schema_names();
+
+        schemas.erase(
+            std::remove(
+                schemas.begin(),
+                schemas.end(),
+                "HEADER_SECTION_SCHEMA"),
+            schemas.end());
+
         std::sort(schemas.begin(), schemas.end());
         return json{
             {"protocolVersion", "1.0"},
