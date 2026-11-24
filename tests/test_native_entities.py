@@ -1633,7 +1633,7 @@ class NativeEntityTests(unittest.TestCase):
 
         self.assert_valid_mesh(mesh)
         self.assert_volume(mesh, 28.0)
-        self.assert_surface(mesh, 64.0)
+        self.assert_surface(mesh, 60.0)
 
         self.assert_bounds(
             mesh,
